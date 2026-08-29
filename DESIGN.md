@@ -78,7 +78,14 @@ mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware �
 
 工具顺序固定为：额度检查 → 原文件快照 → 整体重试循环 → mutation 完成 → artifact → 消息持久化。
 同一个逻辑工具调用无论重试多少次都只创建一条 mutation。ls/read_file/glob/grep/write_file 可以
-重试；edit_file/delete_file/execute 只执行一次。所有最终工具异常都转换为 error ToolMessage。
+重试；edit_file/delete_file/bash 只执行一次。所有最终工具异常都转换为 error ToolMessage。
+
+Bash 默认开启，可通过配置显式关闭。它使用明确的 `/bin/bash -lc`（可配置 executable），从真实
+workspace root 运行，stdin 固定关闭，单次命令受超时和输出字节上限约束。相对路径基于 workspace
+root；绝对路径是宿主机真实路径，不是文件工具的虚拟 `/path`。非零退出码和超时返回 error
+ToolMessage，让模型读取输出后自行修正，不触发自动重试。Bash 不关闭 LangGraph 的批量工具并发；
+模型不得把存在读写依赖的 Bash 和文件操作放进同一批调用。V1 接受模型违反该约束时产生的文件
+读写竞态，以免 Bash 默认开启后让所有独立只读工具退化为串行。
 
 ## 工具结果
 
@@ -117,4 +124,6 @@ TurnEvent，仅展示工具名称、路径等短参数和执行状态，不展�
 `write_file`、`edit_file`、`delete` 在执行前保存文件原始 bytes 到 SHA-256 去重 blob，记录 pending
 mutation；工具成功后写 after hash 和 succeeded，失败则记 failed。撤销不检查当前文件 hash，按
 产品定义直接恢复。崩溃遗留的 pending mutation 也保守恢复；恢复 before 状态是幂等的。
-`execute` 造成的文件变化不在 V1 追踪范围内，目录删除在 V1 中拒绝执行。
+`bash` 造成的文件变化不在 V1 追踪范围内，目录删除在 V1 中拒绝执行。Bash 在宿主机直接运行，
+工作目录不是安全沙箱，也不能阻止命令访问 workspace 外路径；只应在可信的本地开发环境中显式
+启用。需要隔离和可撤销 Shell 时，应改用容器/VM、overlay 或 Git worktree 级执行后端。

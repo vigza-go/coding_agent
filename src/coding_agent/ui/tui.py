@@ -240,6 +240,10 @@ class TerminalUI:
         conversation.add_row("thread", status.thread_id)
         conversation.add_row("active head", str(status.active_head_seq))
         conversation.add_row("next user seq", str(status.next_user_seq))
+        conversation.add_row(
+            "Bash",
+            Text("已启用", style="yellow") if status.bash_enabled else Text("未启用", style="dim"),
+        )
         self.console.print(Panel(conversation, title="会话", title_align="left"))
 
         context = Table(show_header=False, box=None, padding=(0, 2))

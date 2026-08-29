@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import ToolMessage
 
 
 class TurnEventKind(StrEnum):
@@ -55,8 +56,15 @@ class ProgressCallbackHandler(BaseCallbackHandler):
         self.emit(TurnEvent(TurnEventKind.TOOL_STARTED, name, self._tool_detail(inputs)))
 
     def on_tool_end(self, output: Any, *, run_id: UUID, **kwargs: Any) -> None:
-        del output, kwargs
-        self.emit(TurnEvent(TurnEventKind.TOOL_FINISHED, self._pop_tool_name(run_id)))
+        del kwargs
+        name = self._pop_tool_name(run_id)
+        if isinstance(output, ToolMessage) and output.status == "error":
+            detail = "tool returned an error"
+            if isinstance(output.artifact, dict) and "exit_code" in output.artifact:
+                detail = f"exit_code={output.artifact['exit_code']}"
+            self.emit(TurnEvent(TurnEventKind.TOOL_FAILED, name, detail))
+            return
+        self.emit(TurnEvent(TurnEventKind.TOOL_FINISHED, name))
 
     def on_tool_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
         del kwargs

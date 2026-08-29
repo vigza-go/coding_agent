@@ -51,6 +51,7 @@ class ThreadStatus:
     working_messages: int
     working_tokens: int
     working_trigger: int
+    bash_enabled: bool
     work_state: dict[str, Any] | None
 
 
@@ -194,6 +195,7 @@ class AgentApplication:
                 working_messages=usage.working_messages,
                 working_tokens=usage.working_tokens,
                 working_trigger=self.settings.context.working_trigger,
+                bash_enabled=self.settings.agent.bash_enabled,
                 work_state=snapshot.state_json if snapshot is not None else None,
             )
 

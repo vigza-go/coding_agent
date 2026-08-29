@@ -12,7 +12,11 @@
     "tool_retry_max": 2,
     "tool_call_limit": 15,
     "model_call_limit": 20,
-    "filesystem_max_file_size_mb": 10
+    "filesystem_max_file_size_mb": 10,
+    "bash_enabled": true,
+    "bash_executable": "/bin/bash",
+    "bash_timeout_seconds": 120,
+    "bash_max_output_bytes": 100000
   },
   "context": {
     "total_tokens": 1000000,

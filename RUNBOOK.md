@@ -22,6 +22,21 @@ uv run --env-file .env coding-agent --thread demo
 不使用 `.env` 时也可以运行 `uv run coding-agent --thread demo`。增加 `--debug` 会在错误时显示
 完整 traceback。
 
+Bash 工具默认开启。可以在 `config.json` 的 `agent` 中调整或显式关闭：
+
+```json
+{
+  "bash_enabled": true,
+  "bash_executable": "/bin/bash",
+  "bash_timeout_seconds": 120,
+  "bash_max_output_bytes": 100000
+}
+```
+
+也可以通过 `AGENT_BASH_ENABLED=false` 临时关闭。`/status` 会显示 Bash 状态。Bash 命令从
+workspace root 执行；`src/app.py` 这样的相对路径基于 workspace，而 `/tmp/a` 这样的绝对路径
+直接访问宿主机。它不是沙箱，也可能读取当前进程环境，因此不能用于不可信输入或多租户部署。
+
 TUI 命令：
 
 - `/history [N]`：查看最近 N 条有效 canonical 消息；`/list` 是兼容别名。
@@ -45,5 +60,5 @@ uv run ruff check src tests main.py
 uv run pytest -q
 ```
 
-V1 只保证 `write_file`、`edit_file` 和 `delete` 的文件撤销。代理通过 `execute` 执行 shell
+V1 只保证 `write_file`、`edit_file` 和 `delete` 的文件撤销。代理通过 `bash` 执行 shell
 命令造成的文件变化不被 mutation log 捕获。

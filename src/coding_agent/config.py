@@ -62,11 +62,27 @@ class AgentSettings:
     tool_call_limit: int = 200
     model_call_limit: int = 200
     filesystem_max_file_size_mb: int = 10
+    bash_enabled: bool = True
+    bash_executable: str = "/bin/bash"
+    bash_timeout_seconds: int = 120
+    bash_max_output_bytes: int = 100_000
 
     def __post_init__(self) -> None:
-        for name, value in vars(self).items():
+        positive_values = {
+            "tool_retry_max": self.tool_retry_max,
+            "tool_call_limit": self.tool_call_limit,
+            "model_call_limit": self.model_call_limit,
+            "filesystem_max_file_size_mb": self.filesystem_max_file_size_mb,
+            "bash_timeout_seconds": self.bash_timeout_seconds,
+            "bash_max_output_bytes": self.bash_max_output_bytes,
+        }
+        for name, value in positive_values.items():
             if value < 1:
                 raise ValueError(f"{name} must be positive")
+        if not isinstance(self.bash_enabled, bool):
+            raise TypeError("bash_enabled must be a boolean")
+        if not self.bash_executable.strip():
+            raise ValueError("bash_executable must not be empty")
 
 
 @dataclass(frozen=True)
@@ -90,12 +106,40 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _environment_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
+
+
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = Path(path or os.getenv("AGENT_CONFIG", "config.json"))
     raw = _read_json(config_path)
     llm_raw = raw.get("llm", {})
     context_raw = raw.get("context", {})
     agent_raw = raw.get("agent", {})
+    agent_values = dict(agent_raw)
+    configured_bash_enabled = agent_values.get("bash_enabled", AgentSettings.bash_enabled)
+    if not isinstance(configured_bash_enabled, bool):
+        raise TypeError("agent.bash_enabled must be a boolean")
+    agent_values["bash_enabled"] = _environment_bool("AGENT_BASH_ENABLED", configured_bash_enabled)
+    environment_agent_fields = {
+        "bash_executable": "AGENT_BASH_EXECUTABLE",
+        "bash_timeout_seconds": "AGENT_BASH_TIMEOUT_SECONDS",
+        "bash_max_output_bytes": "AGENT_BASH_MAX_OUTPUT_BYTES",
+    }
+    for field_name, environment_name in environment_agent_fields.items():
+        environment_value = os.getenv(environment_name)
+        if environment_value is not None:
+            agent_values[field_name] = (
+                environment_value if field_name == "bash_executable" else int(environment_value)
+            )
 
     workspace = Path(os.getenv("WORKSPACE_ROOT", raw.get("workspace_root", "."))).resolve()
     artifact_dir = Path(
@@ -122,5 +166,5 @@ def load_settings(path: str | Path | None = None) -> Settings:
         artifact_dir=artifact_dir,
         llm=llm,
         context=ContextSettings(**context_raw),
-        agent=AgentSettings(**agent_raw),
+        agent=AgentSettings(**agent_values),
     )
