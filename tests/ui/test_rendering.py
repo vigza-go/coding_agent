@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from coding_agent.ui.rendering import ContentRenderer
+from coding_agent.ui.rendering import TUI_THEME, ContentRenderer
 from coding_agent.ui.tui import TerminalUI
 
 
@@ -29,6 +29,13 @@ def test_renderer_decodes_json_content_strings():
 
 def test_renderer_truncates_history_summaries():
     assert ContentRenderer().summary("abcdef", limit=4) == "abcd…"
+
+
+def test_markdown_renderer_uses_light_terminal_code_styles():
+    markdown = ContentRenderer().markdown("**strong** and `inline code`")
+
+    assert markdown.code_theme == "ansi_light"
+    assert TUI_THEME.styles["markdown.code"].bgcolor is None
 
 
 def test_status_memory_timeline_preserves_block_order():

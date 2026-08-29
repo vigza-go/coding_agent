@@ -8,7 +8,6 @@ from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.markup import escape as markup_escape
 from rich.panel import Panel
 from rich.prompt import Confirm
@@ -20,7 +19,7 @@ from ..application import AgentApplication, TurnExecutionError, create_applicati
 from ..config import load_settings
 from ..services.progress import TurnEvent, TurnEventKind
 from .commands import CommandParseError, ParsedCommand, parse_command, positive_int
-from .rendering import ContentRenderer
+from .rendering import TUI_THEME, ContentRenderer
 
 HELP = """可用命令：
   /history [N]   查看最近 N 条有效消息（默认 20）
@@ -157,9 +156,8 @@ class TerminalUI:
         if answer is None:
             self.console.print("[yellow]本轮没有最终文本回复。[/yellow]")
             return
-        rendered = self.renderer.text(answer.content)
-        if rendered:
-            self.console.print(Markdown(rendered))
+        if self.renderer.text(answer.content):
+            self.console.print(self.renderer.markdown(answer.content))
         else:
             self.console.print("[yellow]模型回复中没有可显示的文本内容。[/yellow]")
 
@@ -188,7 +186,11 @@ class TerminalUI:
             return
         for entry in entries:
             content = self.renderer.summary(entry.content)
-            body = Markdown(content) if entry.message_type == "assistant" else Text(content)
+            body = (
+                self.renderer.markdown(content)
+                if entry.message_type == "assistant"
+                else Text(content)
+            )
             self.console.print(
                 Panel(
                     body,
@@ -301,7 +303,7 @@ def run() -> int:
     parser.add_argument("--config", default=None, help="path to local JSON configuration")
     parser.add_argument("--debug", action="store_true", help="show tracebacks for failures")
     args = parser.parse_args()
-    console = Console()
+    console = Console(theme=TUI_THEME)
 
     try:
         settings = load_settings(args.config)

@@ -3,6 +3,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from rich.markdown import Markdown
+from rich.theme import Theme
+
+TUI_THEME = Theme(
+    {
+        # Rich defaults to "bold cyan on black", which clashes with light terminals.
+        "markdown.code": "bold blue",
+        "markdown.code_block": "none",
+    }
+)
+
 
 class ContentRenderer:
     HIDDEN_BLOCK_TYPES = frozenset(
@@ -17,6 +28,9 @@ class ContentRenderer:
         if len(text) <= limit:
             return text
         return text[:limit].rstrip() + "…"
+
+    def markdown(self, content: Any) -> Markdown:
+        return Markdown(self.text(content), code_theme="ansi_light")
 
     def _extract(self, content: Any) -> str:
         if isinstance(content, str):
