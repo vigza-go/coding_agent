@@ -1,0 +1,29 @@
+{
+  "database_url": "mysql+pymysql://root:password@127.0.0.1:3306/langchain?charset=utf8mb4",
+  "checkpoint_database_url": "mysql://root:password@127.0.0.1:3306/langchain?charset=utf8mb4",
+  "workspace_root": ".",
+  "llm": {
+    "base_url": "https://api.deepseek.com/anthropic",
+    "api_key": "use-the-LLM_API_KEY-environment-variable",
+    "model": "deepseek-v4-flash[1M]",
+    "max_output_tokens": 2000
+  },
+  "agent": {
+    "tool_retry_max": 2,
+    "tool_call_limit": 15,
+    "model_call_limit": 20,
+    "filesystem_max_file_size_mb": 10
+  },
+  "context": {
+    "total_tokens": 1000000,
+    "compression_ratio": 0.25,
+    "working_trigger_ratio": 0.5,
+    "recent_tail_ratio": 0.2,
+    "l0_block_count": 4,
+    "summary_concurrency": 4,
+    "summary_target_ratio": 0.5,
+    "summary_max_attempts": 3,
+    "recent_tool_interactions": 10,
+    "tool_result_inline_tokens": 5000
+  }
+}
