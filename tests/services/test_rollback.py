@@ -60,6 +60,42 @@ def test_failed_file_mutation_is_not_restored(database, tmp_path):
     assert target.read_text(encoding="utf-8") == "external"
 
 
+def test_rollback_preview_reports_scope_without_changing_state(database, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "value.txt"
+    target.write_text("before", encoding="utf-8")
+    recorder = FileMutationRecorder(database, workspace)
+    with database.session() as session:
+        repo = AgentRepository(session)
+        repo.add_message(
+            thread_id="t1",
+            user_seq=2,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "change"}},
+            langchain_message_id="preview-message",
+        )
+        repo.save_work_state("t1", 2, {"step": "change"})
+    mutation_id = recorder.begin(
+        thread_id="t1",
+        user_seq=2,
+        tool_call_id="preview-call",
+        tool_name="write_file",
+        requested_path="/value.txt",
+    )
+    target.write_text("after", encoding="utf-8")
+    recorder.finish(mutation_id, succeeded=True)
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+
+    preview = RollbackService(database, engine, recorder).preview("t1", 2)
+
+    assert preview.messages == 1
+    assert preview.file_mutations == 1
+    assert preview.files == 1
+    assert preview.work_states == 1
+    assert target.read_text(encoding="utf-8") == "after"
+
+
 def test_context_rollback_invalidates_by_message_range_and_reuses_child(database, tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

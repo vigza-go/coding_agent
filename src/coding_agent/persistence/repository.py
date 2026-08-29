@@ -69,12 +69,21 @@ class AgentRepository:
         self.session.flush()
         return row
 
-    def active_messages(self, thread_id: str) -> list[Message]:
+    def active_messages(self, thread_id: str, *, limit: int | None = None) -> list[Message]:
+        stmt = select(Message).where(
+            Message.thread_id == thread_id,
+            Message.active.is_(True),
+        )
+        if limit is None:
+            return list(self.session.scalars(stmt.order_by(Message.id)))
+        rows = list(self.session.scalars(stmt.order_by(Message.id.desc()).limit(limit)))
+        rows.reverse()
+        return rows
+
+    def conversations(self, *, limit: int = 50) -> list[Conversation]:
         return list(
             self.session.scalars(
-                select(Message)
-                .where(Message.thread_id == thread_id, Message.active.is_(True))
-                .order_by(Message.id)
+                select(Conversation).order_by(Conversation.updated_at.desc()).limit(limit)
             )
         )
 

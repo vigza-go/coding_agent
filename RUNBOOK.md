@@ -16,18 +16,25 @@ LangGraph checkpoint 表。已有数据库启动时会执行幂等兼容迁移�
 ## 启动
 
 ```text
-uv run coding-agent --thread demo
+uv run --env-file .env coding-agent --thread demo
 ```
 
-也可以运行 `uv run python main.py --thread demo`。
+不使用 `.env` 时也可以运行 `uv run coding-agent --thread demo`。增加 `--debug` 会在错误时显示
+完整 traceback。
 
 TUI 命令：
 
-- `/list`：查看当前有效的 canonical 消息。
-- `/undo`：撤销当前有效的最后一个用户轮次。
-- `/undo N`：撤销 `user_seq >= N`。
+- `/history [N]`：查看最近 N 条有效 canonical 消息；`/list` 是兼容别名。
+- `/threads`：查看最近会话。
 - `/thread ID`：切换 thread。
+- `/status`：查看当前 head、记忆块层级时间线、压缩区/工作区 token 占用和 work state。
+- `/undo [N]`：预览并确认后撤销 `user_seq >= N`；省略 N 时撤销当前 head。
+- `/help`：查看输入帮助。
 - `/exit`：退出。
+
+输入支持本次进程内的方向键历史；Enter 发送，Alt+Enter 插入换行。模型和工具执行期间会显示
+进度。调用失败或被 Ctrl-C 中断时，TUI 会报告失败轮次并询问是否立即 undo，防止不完整的工具
+协议历史影响下一轮。
 
 ## 验证
 

@@ -35,6 +35,14 @@ class CompactionResult:
     merges_completed: int = 0
 
 
+@dataclass(frozen=True)
+class ContextUsage:
+    memory_levels: tuple[int, ...]
+    memory_tokens: int
+    working_messages: int
+    working_tokens: int
+
+
 class ContextEngine:
     def __init__(
         self, database: Database, settings: ContextSettings, summarizer: Summarizer
@@ -67,6 +75,17 @@ class ContextEngine:
 
     def invalidate(self, thread_id: str) -> None:
         self.cache.invalidate(thread_id)
+
+    def usage(self, thread_id: str) -> ContextUsage:
+        """Return a read-only snapshot of the context currently selected for a thread."""
+
+        with self.cache.locked(thread_id) as state:
+            return ContextUsage(
+                memory_levels=tuple(block.level for block in state.selected_blocks),
+                memory_tokens=sum(block.token_count for block in state.selected_blocks),
+                working_messages=len(state.working_messages),
+                working_tokens=sum(message_tokens(message) for message in state.working_messages),
+            )
 
     def compact_if_needed(self, thread_id: str) -> CompactionResult:
         with self.cache.locked(thread_id) as state:

@@ -86,6 +86,16 @@ mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware �
 单条工具结果超过 5k token 时，完整内容写到 `.artifacts/tool-results/`，模型输入保留前 5k
 token 并附绝对路径，提示代理用 `read_file` 按需读取。
 
+## TUI 交互
+
+TUI 使用 prompt-toolkit 处理多行输入和会话内输入历史，Rich 负责 Markdown、状态和表格渲染。
+用户输入先经过命令路由，未知斜杠命令不会发送给模型。模型与工具 callback 转换成结构化
+TurnEvent，仅展示工具名称、路径等短参数和执行状态，不展开完整工具结果。
+
+每轮在调用 Agent 前持久化用户消息并获得 user_seq。调用异常或 Ctrl-C 中断后，应用抛出包含
+该 user_seq 的 TurnExecutionError；TUI 提示历史可能不完整，并允许立即 rollback。手工 /undo
+必须先展示消息、文件 mutation、不同文件和 work state 数量，再由用户确认。
+
 ## 撤销语义
 
 `rollback(thread_id, N)` 精确定义为撤销 `user_seq >= N`：

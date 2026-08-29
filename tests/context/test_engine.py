@@ -134,6 +134,12 @@ def test_compaction_creates_l0_and_merges_oldest_pairs(database):
         assert sum(block.token_count for block in selected) <= settings.compression_limit
         assert selected == sorted(selected, key=lambda block: block.begin_message_id)
 
+    usage = engine.usage("t1")
+    assert usage.memory_levels == tuple(block.level for block in selected)
+    assert usage.memory_tokens == sum(block.token_count for block in selected)
+    assert usage.working_messages > 0
+    assert usage.working_tokens > 0
+
 
 def test_l0_chunk_summaries_run_concurrently(database):
     add_messages(database, 12, chars=100)

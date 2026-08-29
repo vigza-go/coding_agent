@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import distinct, func, select, update
 
 from ..context.cover import ContextPiece
 from ..context.engine import ContextEngine
 from ..persistence.database import Database
-from ..persistence.models import MemoryBlock, Message, WorkStateSnapshot
+from ..persistence.models import FileMutation, MemoryBlock, Message, WorkStateSnapshot
 from ..persistence.repository import AgentRepository
 from ..workspace.file_undo import FileMutationRecorder
 
@@ -21,6 +21,14 @@ class RollbackResult:
     work_state: dict | None
 
 
+@dataclass(frozen=True)
+class RollbackPreview:
+    messages: int
+    file_mutations: int
+    files: int
+    work_states: int
+
+
 class RollbackService:
     def __init__(
         self,
@@ -31,6 +39,45 @@ class RollbackService:
         self.database = database
         self.context_engine = context_engine
         self.mutation_recorder = mutation_recorder
+
+    def preview(self, thread_id: str, user_seq: int) -> RollbackPreview:
+        if user_seq < 1:
+            raise ValueError("user_seq must be >= 1")
+        with self.database.session() as session:
+            messages = session.scalar(
+                select(func.count(Message.id)).where(
+                    Message.thread_id == thread_id,
+                    Message.user_seq >= user_seq,
+                    Message.active.is_(True),
+                )
+            )
+            mutations = session.scalar(
+                select(func.count(FileMutation.id)).where(
+                    FileMutation.thread_id == thread_id,
+                    FileMutation.user_seq >= user_seq,
+                    FileMutation.active.is_(True),
+                )
+            )
+            files = session.scalar(
+                select(func.count(distinct(FileMutation.path))).where(
+                    FileMutation.thread_id == thread_id,
+                    FileMutation.user_seq >= user_seq,
+                    FileMutation.active.is_(True),
+                )
+            )
+            work_states = session.scalar(
+                select(func.count(WorkStateSnapshot.id)).where(
+                    WorkStateSnapshot.thread_id == thread_id,
+                    WorkStateSnapshot.user_seq >= user_seq,
+                    WorkStateSnapshot.active.is_(True),
+                )
+            )
+        return RollbackPreview(
+            messages=int(messages or 0),
+            file_mutations=int(mutations or 0),
+            files=int(files or 0),
+            work_states=int(work_states or 0),
+        )
 
     def rollback(
         self,
