@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-coding-agent = "coding_agent.tui:main"
+coding-agent = "coding_agent.ui.tui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/coding_agent"]
@@ -36,4 +36,3 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-

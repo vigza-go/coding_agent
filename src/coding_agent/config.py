@@ -59,8 +59,8 @@ class LLMSettings:
 @dataclass(frozen=True)
 class AgentSettings:
     tool_retry_max: int = 2
-    tool_call_limit: int = 15
-    model_call_limit: int = 20
+    tool_call_limit: int = 200
+    model_call_limit: int = 200
     filesystem_max_file_size_mb: int = 10
 
     def __post_init__(self) -> None:

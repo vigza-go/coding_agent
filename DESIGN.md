@@ -72,6 +72,14 @@ rows 重建。进程崩溃或缓存更新失败时也直接丢弃缓存，下次
 checkpoint 不作为该缓存的数据来源。多进程部署仍需同一 thread 固定路由，或增加分布式缓存
 失效通知。
 
+项目只注册一个 AgentRuntimeMiddleware，并由它显式编排上下文投影、调用额度、工具执行、文件
+mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware 仍单独保留用于注册和执行
+文件工具。模型消息和工具最终结果都沿正常返回链持久化，不扫描 state 查找 unseen 消息。
+
+工具顺序固定为：额度检查 → 原文件快照 → 整体重试循环 → mutation 完成 → artifact → 消息持久化。
+同一个逻辑工具调用无论重试多少次都只创建一条 mutation。ls/read_file/glob/grep/write_file 可以
+重试；edit_file/delete_file/execute 只执行一次。所有最终工具异常都转换为 error ToolMessage。
+
 ## 工具结果
 
 送模型前只保留最近 10 条完整 ToolMessage；更早的结果替换成短占位符，数据库原消息不变。

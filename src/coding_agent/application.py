@@ -14,11 +14,12 @@ from .context.cover import ContextPiece
 from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
 from .integrations.langchain_agent import build_model, create_langchain_agent
-from .integrations.middleware import RunContext, pieces_to_messages
+from .integrations.middleware import RunContext
 from .persistence.database import Database
 from .persistence.message_codec import decode_message, encode_message
 from .persistence.models import MessageType
 from .persistence.repository import AgentRepository
+from .services.context_projection import ContextProjectionService
 from .services.rollback import RollbackResult, RollbackService
 from .workspace.file_undo import FileMutationRecorder
 
@@ -82,7 +83,10 @@ class AgentApplication:
 
     def rollback(self, thread_id: str, user_seq: int) -> RollbackResult:
         def repair(pieces: list[ContextPiece], work_state: dict | None) -> None:
-            replacement = [RemoveMessage(id=REMOVE_ALL_MESSAGES), *pieces_to_messages(pieces)]
+            replacement = [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *ContextProjectionService.render_pieces(pieces),
+            ]
             values: dict[str, Any] = {
                 "messages": replacement,
                 "work_state": work_state or {},

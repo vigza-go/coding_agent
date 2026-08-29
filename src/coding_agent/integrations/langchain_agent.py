@@ -7,11 +7,7 @@ from typing import Any, NotRequired
 from deepagents import FilesystemMiddleware
 from deepagents.backends import FilesystemBackend
 from langchain.agents import AgentState, create_agent
-from langchain.agents.middleware import (
-    ModelCallLimitMiddleware,
-    ToolCallLimitMiddleware,
-    ToolRetryMiddleware,
-)
+from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
 from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
@@ -21,14 +17,13 @@ from ..config import Settings
 from ..context.engine import ContextEngine
 from ..persistence.database import Database
 from ..persistence.repository import AgentRepository
+from ..services.call_limits import CallLimitService
+from ..services.context_projection import ContextProjectionService
+from ..services.message_persistence import MessagePersistenceService
+from ..services.tool_execution import ToolExecutionService
 from ..workspace.artifacts import ArtifactStore
-from ..workspace.file_undo import FileMutationRecorder, FileUndoMiddleware
-from .middleware import (
-    ArtifactOffloadMiddleware,
-    CanonicalPersistenceMiddleware,
-    ContextProjectionMiddleware,
-    RunContext,
-)
+from ..workspace.file_undo import FileMutationRecorder
+from .middleware import AgentRuntimeMiddleware, RunContext
 
 
 class RuntimeState(AgentState):
@@ -79,18 +74,24 @@ def create_langchain_agent(
             max_file_size_mb=settings.agent.filesystem_max_file_size_mb,
         )
     )
-    middleware = [
-        ToolRetryMiddleware(max_retries=settings.agent.tool_retry_max),
-        CanonicalPersistenceMiddleware(database, context_engine),
-        ArtifactOffloadMiddleware(ArtifactStore(settings.artifact_dir), settings.context),
-        FileUndoMiddleware(recorder),
-        ContextProjectionMiddleware(context_engine, settings.context),
-        ToolCallLimitMiddleware(run_limit=settings.agent.tool_call_limit),
-        ModelCallLimitMiddleware(run_limit=settings.agent.model_call_limit),
-        filesystem,
-    ]
+    runtime_middleware = AgentRuntimeMiddleware(
+        persistence=MessagePersistenceService(database, context_engine),
+        context_projection=ContextProjectionService(context_engine, settings.context),
+        call_limits=CallLimitService(
+            tool_limit=settings.agent.tool_call_limit,
+            model_limit=settings.agent.model_call_limit,
+        ),
+        tool_execution=ToolExecutionService(
+            max_retries=settings.agent.tool_retry_max,
+            retryable_tools=["ls", "read_file", "glob", "grep", "write_file"],
+        ),
+        artifacts=ArtifactStore(settings.artifact_dir),
+        file_mutations=recorder,
+        tool_result_inline_tokens=settings.context.tool_result_inline_tokens,
+    )
     with PyMySQLSaver.from_conn_string(settings.checkpoint_database_url) as checkpointer:
         checkpointer.setup()
+        middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]
         yield create_agent(
             model=model,
             tools=[make_work_state_tool(database, context_engine)],

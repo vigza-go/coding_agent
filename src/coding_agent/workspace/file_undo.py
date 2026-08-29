@@ -4,8 +4,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolCall
 
 from ..persistence.database import Database
 from ..persistence.models import FileBlob, FileMutation, MutationStatus, OperationType
@@ -34,6 +33,10 @@ def resolve_workspace_path(workspace_root: Path, requested: str) -> Path:
 
 
 class FileMutationRecorder:
+    MUTATING_TOOLS = frozenset(
+        {"write_file", "edit_file", "delete", "delete_file", "remove_file", "write", "edit"}
+    )
+
     def __init__(self, database: Database, workspace_root: Path) -> None:
         self.database = database
         self.workspace_root = workspace_root.resolve()
@@ -73,6 +76,28 @@ class FileMutationRecorder:
             session.add(mutation)
             session.flush()
             return mutation.id
+
+    def begin_for_tool(
+        self,
+        *,
+        thread_id: str,
+        user_seq: int,
+        tool_call: ToolCall,
+    ) -> int | None:
+        tool_name = str(tool_call.get("name", ""))
+        if tool_name not in self.MUTATING_TOOLS:
+            return None
+        args = tool_call.get("args", {})
+        requested_path = args.get("file_path") or args.get("path")
+        if not requested_path:
+            return None
+        return self.begin(
+            thread_id=thread_id,
+            user_seq=user_seq,
+            tool_call_id=tool_call.get("id"),
+            tool_name=tool_name,
+            requested_path=str(requested_path),
+        )
 
     @staticmethod
     def _operation(tool_name: str, existed: bool) -> str:
@@ -135,37 +160,3 @@ class FileMutationRecorder:
             raise RuntimeError(f"blob {blob.id} has neither content nor storage_uri")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-
-
-class FileUndoMiddleware(AgentMiddleware):
-    MUTATING_TOOLS = frozenset(
-        {"write_file", "edit_file", "delete", "delete_file", "remove_file", "write", "edit"}
-    )
-
-    def __init__(self, recorder: FileMutationRecorder) -> None:
-        self.recorder = recorder
-
-    def wrap_tool_call(self, request, handler):
-        name = str(request.tool_call.get("name", ""))
-        if name not in self.MUTATING_TOOLS:
-            return handler(request)
-        args = request.tool_call.get("args", {})
-        requested_path = args.get("file_path") or args.get("path")
-        context = request.runtime.context
-        if not requested_path or context is None:
-            return handler(request)
-        mutation_id = self.recorder.begin(
-            thread_id=context.thread_id,
-            user_seq=context.user_seq,
-            tool_call_id=request.tool_call.get("id"),
-            tool_name=name,
-            requested_path=str(requested_path),
-        )
-        try:
-            result = handler(request)
-        except Exception:
-            self.recorder.finish(mutation_id, succeeded=False)
-            raise
-        succeeded = not (isinstance(result, ToolMessage) and result.status == "error")
-        self.recorder.finish(mutation_id, succeeded=succeeded)
-        return result
