@@ -68,7 +68,10 @@ class TerminalUI:
         while True:
             try:
                 text = self.session.prompt(
-                    HTML(f"<ansicyan>{html_escape(self.thread_id)}</ansicyan> › "),
+                    HTML(
+                        "<b><ansiblue>你</ansiblue></b>"
+                        f" <ansibrightblack>· {html_escape(self.thread_id)}</ansibrightblack> › "
+                    ),
                     prompt_continuation="… ",
                     bottom_toolbar=" Enter 发送 · Alt+Enter 换行 · Ctrl-D 退出 ",
                 ).strip()
@@ -87,6 +90,7 @@ class TerminalUI:
                     if not self._handle_command(command):
                         return
                     continue
+                self.console.rule(style="bright_black")
                 self._run_turn(text)
             except CommandParseError as error:
                 self._error(str(error))
@@ -157,7 +161,15 @@ class TerminalUI:
             self.console.print("[yellow]本轮没有最终文本回复。[/yellow]")
             return
         if self.renderer.text(answer.content):
-            self.console.print(self.renderer.markdown(answer.content))
+            self.console.print(
+                Panel(
+                    self.renderer.markdown(answer.content),
+                    title="Agent",
+                    title_align="left",
+                    border_style="blue",
+                    padding=(0, 1),
+                )
+            )
         else:
             self.console.print("[yellow]模型回复中没有可显示的文本内容。[/yellow]")
 
@@ -191,11 +203,18 @@ class TerminalUI:
                 if entry.message_type == "assistant"
                 else Text(content)
             )
+            role, border_style = {
+                "user": ("你", "green"),
+                "assistant": ("Agent", "blue"),
+                "tool": ("Tool", "yellow"),
+                "system": ("System", "magenta"),
+            }.get(entry.message_type, (entry.message_type, "white"))
             self.console.print(
                 Panel(
                     body,
-                    title=f"user_seq={entry.user_seq} · {entry.message_type}",
+                    title=f"{role} · user_seq={entry.user_seq}",
                     title_align="left",
+                    border_style=border_style,
                     padding=(0, 1),
                 )
             )
