@@ -2,19 +2,17 @@ from __future__ import annotations
 
 import json
 
-from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
-from ..config import ContextSettings
 from ..context.cover import ContextPiece
 from ..context.engine import ContextEngine
 from ..persistence.message_codec import decode_message_data
 
 
 class ContextProjectionService:
-    def __init__(self, context_engine: ContextEngine, settings: ContextSettings) -> None:
+    def __init__(self, context_engine: ContextEngine) -> None:
         self.context_engine = context_engine
-        self.recent_tools = settings.recent_tool_interactions
 
     @staticmethod
     def render_pieces(pieces: list[ContextPiece]) -> list[BaseMessage]:
@@ -36,29 +34,6 @@ class ContextProjectionService:
                 projected.extend(decode_message_data(row.content_json) for row in piece.messages)
         return projected
 
-    @staticmethod
-    def _trim_old_tool_results(messages: list[BaseMessage], keep: int) -> list[BaseMessage]:
-        tool_positions = [
-            index for index, message in enumerate(messages) if isinstance(message, ToolMessage)
-        ]
-        old_positions = set(tool_positions[:-keep]) if keep > 0 else set(tool_positions)
-        result: list[BaseMessage] = []
-        for index, message in enumerate(messages):
-            if index in old_positions and isinstance(message, ToolMessage):
-                result.append(
-                    message.model_copy(
-                        update={
-                            "content": (
-                                "[较早的工具结果已从近期模型输入中剪裁；如需细节，"
-                                "请重新读取文件或执行查询。]"
-                            )
-                        }
-                    )
-                )
-            else:
-                result.append(message)
-        return result
-
     def build(self, thread_id: str) -> list[BaseMessage]:
         self.context_engine.compact_if_needed(thread_id)
         pieces = self.context_engine.rebuild(thread_id)
@@ -76,5 +51,4 @@ class ContextProjectionService:
                     ),
                 )
             )
-        projected = self._trim_old_tool_results(projected, self.recent_tools)
         return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *projected]

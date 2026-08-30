@@ -38,6 +38,8 @@ class ContextSettings:
             raise ValueError("summary_concurrency must be positive")
         if self.summary_max_attempts < 1:
             raise ValueError("summary_max_attempts must be positive")
+        if self.recent_tool_interactions < 0:
+            raise ValueError("recent_tool_interactions must be non-negative")
 
     @property
     def compression_limit(self) -> int:

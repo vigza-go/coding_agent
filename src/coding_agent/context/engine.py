@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 
 from sqlalchemy import select
@@ -93,12 +93,37 @@ class ContextEngine:
             merges = self._merge_until_within_budget(state)
             return CompactionResult(created, merges)
 
+    @staticmethod
+    def _trim_old_tool_results(messages: list[MessageSnapshot], keep: int) -> list[MessageSnapshot]:
+        tool_positions = [index for index, message in enumerate(messages) if message.type == "tool"]
+        old_positions = set(tool_positions[:-keep]) if keep > 0 else set(tool_positions)
+        result: list[MessageSnapshot] = []
+        for index, message in enumerate(messages):
+            if index in old_positions:
+                content_json = {
+                    **message.content_json,
+                    "data": {
+                        **message.content_json["data"],
+                        "content": (
+                            "[较早的工具结果已从近期模型输入中剪裁；如需细节，"
+                            "请重新读取文件或执行查询。]"
+                        ),
+                    },
+                }
+                result.append(replace(message, content_json=content_json))
+            else:
+                result.append(message)
+        return result
+
     def _create_l0_if_needed(self, state: ThreadContextState) -> int:
         working = state.working_messages
         working_tokens = sum(message_tokens(message) for message in working)
         if working_tokens <= self.settings.working_trigger:
             return 0
 
+        # Once triggered, trim exactly once and then partition the resulting messages.
+        working = self._trim_old_tool_results(working, self.settings.recent_tool_interactions)
+        working_tokens = sum(message_tokens(message) for message in working)
         units = atomic_message_units(working)
         tail_target = math.ceil(working_tokens * self.settings.recent_tail_ratio)
         tail_tokens = 0
@@ -108,6 +133,9 @@ class ContextEngine:
             tail_tokens += sum(message_tokens(message) for message in units[split_at])
         prefix_units = units[:split_at]
         chunks = split_atomic_units_token_balanced(prefix_units, self.settings.l0_block_count)
+        if not chunks:
+            state.working_messages = working
+            return 0
         with ThreadPoolExecutor(
             max_workers=min(self.settings.summary_concurrency, len(chunks))
         ) as executor:
@@ -134,7 +162,7 @@ class ContextEngine:
                 MemoryBlockSnapshot.from_model(block) for block in inserted
             )
             consumed = sum(len(chunk) for chunk, _, _ in generated)
-            del state.working_messages[:consumed]
+            state.working_messages = working[consumed:]
         except Exception:
             self.cache.invalidate(state.thread_id)
             raise

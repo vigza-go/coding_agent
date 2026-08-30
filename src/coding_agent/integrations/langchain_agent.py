@@ -79,7 +79,7 @@ def create_langchain_agent(
     )
     runtime_middleware = AgentRuntimeMiddleware(
         persistence=MessagePersistenceService(database, context_engine),
-        context_projection=ContextProjectionService(context_engine, settings.context),
+        context_projection=ContextProjectionService(context_engine),
         call_limits=CallLimitService(
             tool_limit=settings.agent.tool_call_limit,
             model_limit=settings.agent.model_call_limit,

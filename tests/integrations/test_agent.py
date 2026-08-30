@@ -43,7 +43,7 @@ def make_runtime_middleware(
     settings = ContextSettings()
     return AgentRuntimeMiddleware(
         persistence=MessagePersistenceService(database, engine),
-        context_projection=ContextProjectionService(engine, settings),
+        context_projection=ContextProjectionService(engine),
         call_limits=CallLimitService(model_limit=model_limit, tool_limit=tool_limit),
         tool_execution=ToolExecutionService(
             max_retries=max_retries,
