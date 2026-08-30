@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Thread
+from threading import Condition, Thread
 from time import monotonic
 
 
@@ -17,6 +17,7 @@ class BashResult:
     duration_seconds: float
     timed_out: bool = False
     truncated: bool = False
+    interrupted: bool = False
 
 
 class BashExecutionService:
@@ -43,6 +44,31 @@ class BashExecutionService:
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         self.env = dict(env) if env is not None else os.environ.copy()
+        self._process_condition = Condition()
+        self._active_processes: dict[int, subprocess.Popen[bytes]] = {}
+        self._interrupted_processes: set[int] = set()
+        self._interrupt_requested = False
+
+    def prepare_turn(self) -> None:
+        with self._process_condition:
+            self._interrupt_requested = False
+
+    def interrupt_all(self, *, wait_seconds: float = 5.0) -> int:
+        with self._process_condition:
+            self._interrupt_requested = True
+            processes = list(self._active_processes.values())
+            self._interrupted_processes.update(process.pid for process in processes)
+        for process in processes:
+            self._kill_process_group(process)
+
+        deadline = monotonic() + wait_seconds
+        with self._process_condition:
+            while self._active_processes:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    break
+                self._process_condition.wait(timeout=remaining)
+        return len(processes)
 
     def execute(self, command: str, *, timeout_seconds: int | None = None) -> BashResult:
         if not command.strip():
@@ -66,6 +92,13 @@ class BashExecutionService:
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+        with self._process_condition:
+            self._active_processes[process.pid] = process
+            interrupt_immediately = self._interrupt_requested
+            if interrupt_immediately:
+                self._interrupted_processes.add(process.pid)
+        if interrupt_immediately:
+            self._kill_process_group(process)
         captured = bytearray()
         truncated = False
 
@@ -93,6 +126,14 @@ class BashExecutionService:
             reader.join()
             if process.stdout is not None:
                 process.stdout.close()
+            with self._process_condition:
+                interrupted = process.pid in self._interrupted_processes
+                self._interrupted_processes.discard(process.pid)
+                self._active_processes.pop(process.pid, None)
+                self._process_condition.notify_all()
+
+        if interrupted:
+            exit_code = 130
 
         output = captured.decode("utf-8", errors="replace").rstrip()
         if not output:
@@ -101,12 +142,15 @@ class BashExecutionService:
             output += f"\n\n[output truncated at {self.max_output_bytes:,} bytes]"
         if timed_out:
             output += f"\n\n[command timed out after {effective_timeout}s]"
+        if interrupted:
+            output += "\n\n[command interrupted by user]"
         return BashResult(
             output=output,
             exit_code=exit_code,
             duration_seconds=monotonic() - started,
             timed_out=timed_out,
             truncated=truncated,
+            interrupted=interrupted,
         )
 
     @staticmethod

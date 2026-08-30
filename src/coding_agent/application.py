@@ -20,7 +20,9 @@ from .persistence.database import Database
 from .persistence.message_codec import decode_message, encode_message
 from .persistence.models import MessageType
 from .persistence.repository import AgentRepository
+from .services.bash_execution import BashExecutionService
 from .services.context_projection import ContextProjectionService
+from .services.message_persistence import MessagePersistenceService
 from .services.progress import ProgressCallbackHandler, TurnEvent
 from .services.rollback import RollbackPreview, RollbackResult, RollbackService
 from .workspace.file_undo import FileMutationRecorder
@@ -63,11 +65,15 @@ class TurnExecutionError(RuntimeError):
         user_seq: int,
         cause: BaseException,
         interrupted: bool = False,
+        closed_tool_results: int = 0,
+        finalization_errors: tuple[str, ...] = (),
     ) -> None:
         self.thread_id = thread_id
         self.user_seq = user_seq
         self.cause = cause
         self.interrupted = interrupted
+        self.closed_tool_results = closed_tool_results
+        self.finalization_errors = finalization_errors
         label = "interrupted" if interrupted else "failed"
         super().__init__(f"turn {user_seq} {label}: {cause}")
 
@@ -80,12 +86,15 @@ class AgentApplication:
         agent: Any,
         context_engine: ContextEngine,
         recorder: FileMutationRecorder,
+        bash_executor: BashExecutionService | None = None,
     ) -> None:
         self.settings = settings
         self.database = database
         self.agent = agent
         self.recorder = recorder
         self.context_engine = context_engine
+        self.bash_executor = bash_executor
+        self.message_persistence = MessagePersistenceService(database, context_engine)
         self.rollback_service = RollbackService(database, context_engine, recorder)
 
     @staticmethod
@@ -114,6 +123,8 @@ class AgentApplication:
                 langchain_message_id=human.id,
             )
         self.context_engine.append_messages(thread_id, [row])
+        if self.bash_executor is not None:
+            self.bash_executor.prepare_turn()
         config = self.config(thread_id, user_seq)
         if on_event is not None:
             config["callbacks"] = [ProgressCallbackHandler(on_event)]
@@ -124,17 +135,27 @@ class AgentApplication:
                 context=RunContext(thread_id, user_seq),
             )
         except KeyboardInterrupt as error:
+            closed_tool_results, finalization_errors = self._finalize_failed_turn(
+                thread_id, user_seq
+            )
             raise TurnExecutionError(
                 thread_id=thread_id,
                 user_seq=user_seq,
                 cause=error,
                 interrupted=True,
+                closed_tool_results=closed_tool_results,
+                finalization_errors=finalization_errors,
             ) from error
         except Exception as error:
+            closed_tool_results, finalization_errors = self._finalize_failed_turn(
+                thread_id, user_seq
+            )
             raise TurnExecutionError(
                 thread_id=thread_id,
                 user_seq=user_seq,
                 cause=error,
+                closed_tool_results=closed_tool_results,
+                finalization_errors=finalization_errors,
             ) from error
         return next(
             (
@@ -144,6 +165,23 @@ class AgentApplication:
             ),
             None,
         )
+
+    def _finalize_failed_turn(self, thread_id: str, user_seq: int) -> tuple[int, tuple[str, ...]]:
+        errors: list[str] = []
+        if self.bash_executor is not None:
+            try:
+                self.bash_executor.interrupt_all()
+            except Exception as error:  # noqa: BLE001 - preserve the original turn failure
+                errors.append(f"终止 Bash 失败：{type(error).__name__}: {error}")
+        try:
+            closed = self.message_persistence.close_incomplete_tool_batch(
+                thread_id=thread_id,
+                user_seq=user_seq,
+            )
+        except Exception as error:  # noqa: BLE001 - preserve the original turn failure
+            closed = 0
+            errors.append(f"补齐工具结果失败：{type(error).__name__}: {error}")
+        return closed, tuple(errors)
 
     def rollback(self, thread_id: str, user_seq: int) -> RollbackResult:
         def repair(pieces: list[ContextPiece], work_state: dict | None) -> None:
@@ -207,11 +245,29 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
     model = build_model(settings)
     context_engine = ContextEngine(database, settings.context, LangChainSummarizer(model))
     recorder = FileMutationRecorder(database, settings.workspace_root)
+    bash_executor = (
+        BashExecutionService(
+            executable=settings.agent.bash_executable,
+            workspace_root=settings.workspace_root,
+            timeout_seconds=settings.agent.bash_timeout_seconds,
+            max_output_bytes=settings.agent.bash_max_output_bytes,
+        )
+        if settings.agent.bash_enabled
+        else None
+    )
     with create_langchain_agent(
         settings=settings,
         database=database,
         context_engine=context_engine,
         recorder=recorder,
         model=model,
+        bash_executor=bash_executor,
     ) as agent:
-        yield AgentApplication(settings, database, agent, context_engine, recorder)
+        yield AgentApplication(
+            settings,
+            database,
+            agent,
+            context_engine,
+            recorder,
+            bash_executor,
+        )

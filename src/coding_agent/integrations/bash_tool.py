@@ -58,6 +58,7 @@ def make_bash_tool(executor: BashExecutionService) -> BaseTool:
                 "duration_seconds": result.duration_seconds,
                 "timed_out": result.timed_out,
                 "truncated": result.truncated,
+                "interrupted": result.interrupted,
             },
         )
 

@@ -26,6 +26,24 @@ class TurnEvent:
     detail: str | None = None
 
 
+class TurnEventGate:
+    """Drop callbacks after a turn ends and drain any event already being rendered."""
+
+    def __init__(self, emit: Callable[[TurnEvent], None]) -> None:
+        self._emit = emit
+        self._lock = Lock()
+        self._open = True
+
+    def emit(self, event: TurnEvent) -> None:
+        with self._lock:
+            if self._open:
+                self._emit(event)
+
+    def close(self) -> None:
+        with self._lock:
+            self._open = False
+
+
 class ProgressCallbackHandler(BaseCallbackHandler):
     def __init__(self, emit: Callable[[TurnEvent], None]) -> None:
         self.emit = emit

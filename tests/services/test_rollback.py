@@ -158,3 +158,46 @@ def test_context_rollback_invalidates_by_message_range_and_reuses_child(database
         conversation = AgentRepository(session).get_or_create_conversation("t1")
         assert conversation.active_head_seq == 1
         assert conversation.next_user_seq == 4
+
+
+def test_rollback_head_skips_already_inactive_sequence(database, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with database.session() as session:
+        repo = AgentRepository(session)
+        repo.add_message(
+            thread_id="t1",
+            user_seq=1,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "first"}},
+            langchain_message_id="head-first",
+        )
+        second = repo.add_message(
+            thread_id="t1",
+            user_seq=2,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "second"}},
+            langchain_message_id="head-second",
+        )
+        repo.add_message(
+            thread_id="t1",
+            user_seq=3,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "third"}},
+            langchain_message_id="head-third",
+        )
+        second.active = False
+        conversation = repo.get_or_create_conversation("t1")
+        conversation.active_head_seq = 3
+        conversation.next_user_seq = 4
+
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    recorder = FileMutationRecorder(database, workspace)
+    RollbackService(database, engine, recorder).rollback("t1", 3)
+
+    with database.session() as session:
+        repo = AgentRepository(session)
+        conversation = repo.get_or_create_conversation("t1")
+        assert conversation.active_head_seq == 1
+        assert repo.latest_active_user_seq("t1") == 1
+        assert [row.user_seq for row in repo.active_messages("t1")] == [1]

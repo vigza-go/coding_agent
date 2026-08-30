@@ -133,7 +133,7 @@ class RollbackService:
                     )
                     .values(active=False)
                 )
-            conversation.active_head_seq = min(conversation.active_head_seq, user_seq - 1)
+            conversation.active_head_seq = repo.latest_active_user_seq(thread_id)
 
         self.context_engine.invalidate(thread_id)
         pieces = self.context_engine.rebuild(thread_id)

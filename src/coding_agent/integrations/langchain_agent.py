@@ -68,6 +68,7 @@ def create_langchain_agent(
     context_engine: ContextEngine,
     recorder: FileMutationRecorder,
     model: ChatAnthropic,
+    bash_executor: BashExecutionService | None,
 ) -> Generator[Any, None, None]:
     filesystem = FilesystemMiddleware(
         backend=FilesystemBackend(
@@ -94,16 +95,9 @@ def create_langchain_agent(
     tools = [make_work_state_tool(database, context_engine)]
     bash_prompt = ""
     if settings.agent.bash_enabled:
-        tools.append(
-            make_bash_tool(
-                BashExecutionService(
-                    executable=settings.agent.bash_executable,
-                    workspace_root=settings.workspace_root,
-                    timeout_seconds=settings.agent.bash_timeout_seconds,
-                    max_output_bytes=settings.agent.bash_max_output_bytes,
-                )
-            )
-        )
+        if bash_executor is None:
+            raise RuntimeError("bash is enabled but no BashExecutionService was provided")
+        tools.append(make_bash_tool(bash_executor))
         bash_prompt = (
             "Bash 从工作区根目录运行；相对路径基于该目录，绝对路径表示宿主机真实路径，不是"
             "文件工具的虚拟路径。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "

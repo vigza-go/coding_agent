@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -79,6 +79,15 @@ class AgentRepository:
         rows = list(self.session.scalars(stmt.order_by(Message.id.desc()).limit(limit)))
         rows.reverse()
         return rows
+
+    def latest_active_user_seq(self, thread_id: str) -> int:
+        value = self.session.scalar(
+            select(func.max(Message.user_seq)).where(
+                Message.thread_id == thread_id,
+                Message.active.is_(True),
+            )
+        )
+        return int(value or 0)
 
     def conversations(self, *, limit: int = 50) -> list[Conversation]:
         return list(

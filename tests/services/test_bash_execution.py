@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import shutil
+from concurrent.futures import ThreadPoolExecutor
+from time import monotonic, sleep
 
 import pytest
 from langchain.agents import create_agent
@@ -82,3 +84,20 @@ def test_bash_tool_returns_nonzero_exit_as_error_message(tmp_path):
     assert message.tool_call_id == "bash-call"
     assert message.artifact["exit_code"] == 7
     assert "failure" in message.content
+
+
+def test_bash_interrupt_kills_the_running_process_group(tmp_path):
+    executor = make_executor(tmp_path, timeout=10)
+    executor.prepare_turn()
+    started = monotonic()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(executor.execute, "sleep 10")
+        sleep(0.1)
+        executor.interrupt_all()
+        result = future.result(timeout=2)
+
+    assert result.exit_code == 130
+    assert result.interrupted is True
+    assert "interrupted by user" in result.output
+    assert monotonic() - started < 2

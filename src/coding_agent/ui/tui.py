@@ -17,7 +17,7 @@ from rich.text import Text
 
 from ..application import AgentApplication, TurnExecutionError, create_application
 from ..config import load_settings
-from ..services.progress import TurnEvent, TurnEventKind
+from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
 from .commands import CommandParseError, ParsedCommand, parse_command, positive_int
 from .rendering import TUI_THEME, ContentRenderer
 
@@ -139,22 +139,42 @@ class TerminalUI:
 
     def _run_turn(self, text: str) -> None:
         with self.console.status("[cyan]正在准备上下文…[/cyan]", spinner="dots") as status:
+            event_gate = TurnEventGate(lambda event: self._render_event(status, event))
+            failure: TurnExecutionError | None = None
             try:
                 answer = self.app.run_turn(
                     self.thread_id,
                     text,
-                    on_event=lambda event: self._render_event(status, event),
+                    on_event=event_gate.emit,
                 )
             except TurnExecutionError as error:
+                failure = error
+                answer = None
+            finally:
+                event_gate.close()
+
+            if failure is not None:
                 status.stop()
-                label = "已中断" if error.interrupted else "执行失败"
+                label = "已中断" if failure.interrupted else "执行失败"
                 self._error(
-                    f"本轮 {label}（user_seq={error.user_seq}）："
-                    f"{type(error.cause).__name__}: {error.cause}"
+                    f"本轮 {label}（user_seq={failure.user_seq}）："
+                    f"{type(failure.cause).__name__}: {failure.cause}"
                 )
-                self.console.print("[yellow]本轮历史可能不完整，继续前建议先撤销。[/yellow]")
-                if Confirm.ask(f"现在撤销 user_seq >= {error.user_seq} 吗？", default=True):
-                    self._rollback(error.user_seq)
+                if failure.finalization_errors:
+                    self.console.print(
+                        "[red]中断收尾未完整完成："
+                        + "；".join(failure.finalization_errors)
+                        + "。继续前请撤销本轮。[/red]"
+                    )
+                elif failure.closed_tool_results:
+                    self.console.print(
+                        f"[yellow]已为 {failure.closed_tool_results} 个未完成工具调用补入中断结果，"
+                        "工具协议已闭合。[/yellow]"
+                    )
+                else:
+                    self.console.print("[yellow]中断收尾已完成，没有发现缺失的工具结果。[/yellow]")
+                if Confirm.ask(f"现在撤销 user_seq >= {failure.user_seq} 吗？", default=True):
+                    self._rollback(failure.user_seq)
                 return
 
         if answer is None:

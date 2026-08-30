@@ -100,8 +100,15 @@ TUI 使用 prompt-toolkit 处理多行输入和会话内输入历史，Rich 负�
 TurnEvent，仅展示工具名称、路径等短参数和执行状态，不展开完整工具结果。
 
 每轮在调用 Agent 前持久化用户消息并获得 user_seq。调用异常或 Ctrl-C 中断后，应用抛出包含
-该 user_seq 的 TurnExecutionError；TUI 提示历史可能不完整，并允许立即 rollback。手工 /undo
-必须先展示消息、文件 mutation、不同文件和 work state 数量，再由用户确认。
+该 user_seq 的 TurnExecutionError。异常边界会先终止仍在运行的 Bash 进程组，再检查本轮尾部
+tool-call batch；每个缺失结果都用确定性 `tool-{tool_call_id}` 消息 ID 补入 error ToolMessage，
+保证下一次模型调用的工具协议完整。迟到的真实结果使用同一 ID，被 canonical 持久化幂等吸收。
+TUI 展示补齐数量；如果中断收尾自身失败，则明确要求撤销，不用收尾错误覆盖原始调用错误。
+用户仍可决定是否 rollback。手工 /undo 必须先展示消息、文件 mutation、
+不同文件和 work state 数量，再由用户确认。
+
+每轮 TUI 进度事件有独立生命周期。轮次结束或中断时先关闭事件入口并等待正在渲染的事件结束，
+迟到的工具线程回调不得写入下一轮输入区域。
 
 ## 撤销语义
 
@@ -111,7 +118,8 @@ TurnEvent，仅展示工具名称、路径等短参数和执行状态，不展�
 2. `messages.user_seq >= N` 标记 inactive。
 3. `work_state_snapshots.user_seq >= N` 标记 inactive。
 4. 根据撤销消息 id 的范围，停用与之相交的 memory block；不使用 user_seq 猜测块范围。
-5. `active_head_seq = min(active_head_seq, N - 1)`，`next_user_seq` 不回退。
+5. 从剩余 active 消息重新计算最大 `user_seq` 作为 `active_head_seq`，空历史为 0；
+   `next_user_seq` 不回退。
 6. 从所有 active memory block 中执行最长左块贪心覆盖，缺口回退到原始消息。
 7. 用 `RemoveMessage(REMOVE_ALL_MESSAGES)` 加重建结果替换 LangGraph checkpoint 消息。
 8. 恢复最近的有效 work state。
