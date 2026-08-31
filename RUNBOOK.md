@@ -43,6 +43,7 @@ TUI 命令：
 - `/threads`：查看最近会话。
 - `/thread ID`：切换 thread。
 - `/status`：查看当前 head、记忆块层级时间线、压缩区/工作区 token 占用和 work state。
+- `/usage [N]`：查看当前会话最近 N 条模型回复的 API 用量和加权缓存命中率，默认 20。
 - `/undo [N]`：预览并确认后撤销 `user_seq >= N`；省略 N 时撤销当前 head。
 - `/help`：查看输入帮助。
 - `/exit`：退出。
@@ -68,12 +69,62 @@ ToolMessage；即使选择不 undo，下一轮也不会因孤立 tool call 被�
 已生成且仍有效的记忆块继续使用。
 原始记录仍可通过 `/history` 查看。单条工具结果的 5k 截断及 artifact 落盘规则不变。
 
+## 完成通知与防休眠
+
+默认开启。可在 `config.json` 中添加以下配置，修改后重启 TUI：
+
+```json
+{
+  "tui": {
+    "notifications_enabled": true,
+    "prevent_sleep": true,
+    "usage_recent_messages": 20,
+    "system_command_timeout_seconds": 3
+  }
+}
+```
+
+`AGENT_NOTIFICATIONS_ENABLED`、`AGENT_PREVENT_SLEEP`、`AGENT_USAGE_RECENT_MESSAGES` 环境变量
+分别覆盖前三项。
+
+- 通知表示一轮调用结束并返回控制权，不表示代理已验证整个项目完成；执行失败和中断也会通知。
+  macOS 通过 `osascript` 发送通知，仅含会话名、状态和耗时，不包含提问、模型回答或工具输出。
+  如果发送失败或不是 macOS，则尝试终端提示音；终端静音时可能听不到。
+  通知横幅受 macOS「通知」权限与专注模式影响；命令成功不代表用户一定看到横幅。
+- 防休眠在模型/工具执行前启动 `caffeinate -i -w <应用进程 PID>`，正常结束、失败或 Ctrl-C
+  后释放，并且在等待撤销确认时已经释放；应用进程退出时也会释放。不阻止显示器熄屏，
+  不更改系统电源设置，也不保证合盖、手动睡眠或断电后任务继续执行。
+  当前只支持 macOS；其他系统或缺少工具时给出一次提示，不阻止任务运行。
+
+## 缓存命中率口径
+
+`/usage` 直接读取已持久化助手消息中的 LangChain `usage_metadata`，无需增加表或调用模型；
+旧会话若记录了这些字段，也可以查询。按全局消息 id 取当前会话最近 N 条助手消息，可能
+包含多个用户轮次或不同模型，不是最近 N 条用户输入；缺少用量的回复仍占样本位置并明确显示覆盖数。
+
+缓存命中率 = 可统计样本的 `cache_read` 总和 / 同批样本的 `input_tokens` 总和。
+标准化后的 `input_tokens` 已包含缓存读取和创建量，不能再次相加；不使用工作区估算 token，
+也不对每次请求的命中百分比直接取平均。缺失/无效缓存字段不当作 0% 计入，输入为 0 时显示
+无法计算。未命中输入包含缓存创建，不代表这一部分价格都相同。
+
+已撤销历史仍计入（撤销不会退还用量）。当前仅覆盖已落库的主模型响应，不包含摘要请求、
+没有用量记录的失败请求和 SDK 内部重试，因此不是完整计费账单。
+
 ## 验证
 
 ```text
 uv run ruff check src tests main.py
 uv run pytest -q
 ```
+
+文件并发回归测试默认使用 SQLite。设置 `TEST_MYSQL_ADMIN_URL` 后运行
+`uv run pytest -q tests/integrations/test_file_concurrency.py`，还会验证 MySQL 并发插入和
+REPEATABLE READ 下的 blob 复用。该连接需有创建/删除数据库权限；测试仅使用自动生成的
+`coding_agent_test_<随机标识>` 临时库，结束后删除，不在 URI 指定的业务库中写测试数据。
+
+文件快照并发修复不需要数据库迁移。更新代码后需重启 TUI 才生效，旧会话可继续使用。
+同一应用内，针对同一路径的受控写工具串行执行，不同文件仍可并行；Bash 和外部进程不受
+此锁保护。修复不会自动重放之前失败的编辑，也不会撤销之前成功的文件变更。
 
 V1 只保证 `write_file`、`edit_file` 和 `delete` 的文件撤销。代理通过 `bash` 执行 shell
 命令造成的文件变化不被 mutation log 捕获。

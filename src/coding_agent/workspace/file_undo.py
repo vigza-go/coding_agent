@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
+from threading import Lock, RLock
 from typing import Any
 
 from langchain_core.messages import ToolCall
@@ -40,6 +43,8 @@ class FileMutationRecorder:
     def __init__(self, database: Database, workspace_root: Path) -> None:
         self.database = database
         self.workspace_root = workspace_root.resolve()
+        self._path_locks: dict[Path, RLock] = {}
+        self._path_locks_guard = Lock()
 
     def begin(
         self,
@@ -77,27 +82,36 @@ class FileMutationRecorder:
             session.flush()
             return mutation.id
 
-    def begin_for_tool(
+    @contextmanager
+    def mutation_for_tool(
         self,
         *,
         thread_id: str,
         user_seq: int,
         tool_call: ToolCall,
-    ) -> int | None:
+    ) -> Generator[int | None, None, None]:
+        """Hold a per-file lock across snapshot, execution/retries and finalization."""
+
         tool_name = str(tool_call.get("name", ""))
         if tool_name not in self.MUTATING_TOOLS:
-            return None
+            yield None
+            return
         args = tool_call.get("args", {})
         requested_path = args.get("file_path") or args.get("path")
         if not requested_path:
-            return None
-        return self.begin(
-            thread_id=thread_id,
-            user_seq=user_seq,
-            tool_call_id=tool_call.get("id"),
-            tool_name=tool_name,
-            requested_path=str(requested_path),
-        )
+            yield None
+            return
+        path = resolve_workspace_path(self.workspace_root, str(requested_path))
+        with self._path_locks_guard:
+            path_lock = self._path_locks.setdefault(path, RLock())
+        with path_lock:
+            yield self.begin(
+                thread_id=thread_id,
+                user_seq=user_seq,
+                tool_call_id=tool_call.get("id"),
+                tool_name=tool_name,
+                requested_path=str(path),
+            )
 
     @staticmethod
     def _operation(tool_name: str, existed: bool) -> str:

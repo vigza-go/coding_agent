@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import Select, func, select
+from sqlalchemy.dialects.mysql import insert as mysql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -96,6 +98,19 @@ class AgentRepository:
             )
         )
 
+    def recent_usage_metadata(self, thread_id: str, *, limit: int) -> list[Any]:
+        if limit < 1:
+            raise ValueError("usage limit must be positive")
+        # Include inactive history: undo does not refund API usage. Do not load message bodies.
+        return list(
+            self.session.scalars(
+                select(Message.content_json["data"]["usage_metadata"])
+                .where(Message.thread_id == thread_id, Message.type == "assistant")
+                .order_by(Message.id.desc())
+                .limit(limit)
+            )
+        )
+
     def memory_blocks(self, thread_id: str, *, active_only: bool = True) -> list[MemoryBlock]:
         stmt = select(MemoryBlock).where(MemoryBlock.thread_id == thread_id)
         if active_only:
@@ -155,13 +170,26 @@ class AgentRepository:
         return self.session.scalar(select(FileBlob).where(FileBlob.sha256 == sha256))
 
     def add_blob(self, *, sha256: str, content: bytes | None, storage_uri: str | None) -> FileBlob:
-        existing = self.blob_by_sha(sha256)
-        if existing is not None:
-            return existing
-        blob = FileBlob(sha256=sha256, content=content, storage_uri=storage_uri)
-        self.session.add(blob)
-        self.session.flush()
-        return blob
+        values = {"sha256": sha256, "content": content, "storage_uri": storage_uri}
+        dialect = self.session.get_bind().dialect.name
+        if dialect in {"mysql", "mariadb"}:
+            # A duplicate is normal: reuse the immutable blob without overwriting it.
+            statement = (
+                mysql_insert(FileBlob).values(**values).on_duplicate_key_update(id=FileBlob.id)
+            )
+        elif dialect == "sqlite":
+            statement = (
+                sqlite_insert(FileBlob)
+                .values(**values)
+                .on_conflict_do_nothing(index_elements=[FileBlob.sha256])
+            )
+        else:
+            raise NotImplementedError(f"atomic blob insertion is not supported for {dialect}")
+        self.session.execute(statement)
+        # Use a current read, even if MySQL REPEATABLE READ already has an older snapshot.
+        return self.session.scalars(
+            select(FileBlob).where(FileBlob.sha256 == sha256).with_for_update()
+        ).one()
 
     def mutations_to_rollback(self, thread_id: str, from_user_seq: int) -> list[FileMutation]:
         return list(

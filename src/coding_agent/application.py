@@ -25,6 +25,7 @@ from .services.context_projection import ContextProjectionService
 from .services.message_persistence import MessagePersistenceService
 from .services.progress import ProgressCallbackHandler, TurnEvent
 from .services.rollback import RollbackPreview, RollbackResult, RollbackService
+from .services.usage import RecentUsage
 from .workspace.file_undo import FileMutationRecorder
 
 
@@ -217,6 +218,14 @@ class AgentApplication:
             return [
                 ThreadSummary(row.thread_id, row.active_head_seq, row.updated_at) for row in rows
             ]
+
+    def recent_usage(self, thread_id: str, *, limit: int | None = None) -> RecentUsage:
+        with self.database.session() as session:
+            records = AgentRepository(session).recent_usage_metadata(
+                thread_id,
+                limit=self.settings.tui.usage_recent_messages if limit is None else limit,
+            )
+        return RecentUsage.from_metadata(records)
 
     def thread_status(self, thread_id: str) -> ThreadStatus:
         usage = self.context_engine.usage(thread_id)

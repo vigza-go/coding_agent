@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from html import escape as html_escape
+from time import monotonic
 
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -17,6 +18,7 @@ from rich.text import Text
 
 from ..application import AgentApplication, TurnExecutionError, create_application
 from ..config import load_settings
+from ..integrations.desktop import DesktopService
 from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
 from .commands import CommandParseError, ParsedCommand, parse_command, positive_int
 from .rendering import TUI_THEME, ContentRenderer
@@ -26,6 +28,7 @@ HELP = """可用命令：
   /threads       查看最近会话
   /thread ID     切换会话
   /status        查看当前会话状态
+  /usage [N]     查询近期 N 条模型回复的 API 用量与缓存命中率
   /undo [SEQ]    预览并撤销 SEQ 及之后的历史
   /help          显示帮助
   /exit          退出
@@ -54,6 +57,10 @@ class TerminalUI:
         self.thread_id = thread_id
         self.debug = debug
         self.renderer = ContentRenderer()
+        self.desktop = DesktopService(
+            app.settings.tui,
+            lambda message: self.console.print(Text(message, style="yellow")),
+        )
         self.session: PromptSession[str] = PromptSession(
             history=InMemoryHistory(),
             multiline=True,
@@ -124,6 +131,14 @@ class TerminalUI:
         if command.name == "status":
             self._show_status()
             return True
+        if command.name == "usage":
+            limit = (
+                positive_int(command.argument, label="usage 数量")
+                if command.argument is not None
+                else self.app.settings.tui.usage_recent_messages
+            )
+            self._show_usage(limit)
+            return True
         if command.name == "undo":
             user_seq = (
                 positive_int(command.argument, label="user_seq")
@@ -138,15 +153,17 @@ class TerminalUI:
         raise CommandParseError(f"未实现命令：/{command.name}")
 
     def _run_turn(self, text: str) -> None:
+        started_at = monotonic()
         with self.console.status("[cyan]正在准备上下文…[/cyan]", spinner="dots") as status:
             event_gate = TurnEventGate(lambda event: self._render_event(status, event))
             failure: TurnExecutionError | None = None
             try:
-                answer = self.app.run_turn(
-                    self.thread_id,
-                    text,
-                    on_event=event_gate.emit,
-                )
+                with self.desktop.keep_awake():
+                    answer = self.app.run_turn(
+                        self.thread_id,
+                        text,
+                        on_event=event_gate.emit,
+                    )
             except TurnExecutionError as error:
                 failure = error
                 answer = None
@@ -173,6 +190,7 @@ class TerminalUI:
                     )
                 else:
                     self.console.print("[yellow]中断收尾已完成，没有发现缺失的工具结果。[/yellow]")
+                self._notify_turn(label, started_at)
                 if Confirm.ask(f"现在撤销 user_seq >= {failure.user_seq} 吗？", default=True):
                     self._rollback(failure.user_seq)
                 return
@@ -192,6 +210,14 @@ class TerminalUI:
             )
         else:
             self.console.print("[yellow]模型回复中没有可显示的文本内容。[/yellow]")
+        self._notify_turn("本轮完成", started_at)
+
+    def _notify_turn(self, outcome: str, started_at: float) -> None:
+        if not self.app.settings.tui.notifications_enabled:
+            return
+        elapsed = monotonic() - started_at
+        if not self.desktop.notify(f"会话 {self.thread_id} · {outcome} · {elapsed:.1f} 秒"):
+            self.console.bell()
 
     def _render_event(self, status: Status, event: TurnEvent) -> None:
         if event.kind == TurnEventKind.MODEL_STARTED:
@@ -290,6 +316,37 @@ class TerminalUI:
                     title_align="left",
                 )
             )
+
+    def _show_usage(self, limit: int) -> None:
+        usage = self.app.recent_usage(self.thread_id, limit=limit)
+        if not usage.sampled_messages:
+            self.console.print("当前会话还没有模型回复用量记录。")
+            return
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_row("范围", f"当前会话最近 {usage.sampled_messages} 条模型回复（含撤销历史）")
+        table.add_row("API 用量样本", f"{usage.usage_samples} / {usage.sampled_messages}")
+        if usage.usage_samples:
+            table.add_row("输入", f"{usage.input_tokens:,} tokens")
+            table.add_row("输出", f"{usage.output_tokens:,} tokens")
+        table.add_row("缓存统计样本", f"{usage.cache_samples} / {usage.sampled_messages}")
+        rate = usage.cache_hit_rate
+        if rate is None:
+            table.add_row("缓存命中率", "暂无可计算数据（缺少字段或输入为 0）")
+        else:
+            table.add_row("缓存命中率", Text(f"{rate:.1%}", style="bold cyan"))
+            table.add_row(
+                "缓存命中 / 可统计输入",
+                f"{usage.cache_read_tokens:,} / {usage.cache_input_tokens:,} tokens",
+            )
+            table.add_row(
+                "未命中输入（含缓存创建）",
+                f"{usage.cache_input_tokens - usage.cache_read_tokens:,} tokens",
+            )
+        self.console.print(Panel(table, title="近期 API 用量", title_align="left"))
+        self.console.print(
+            "[dim]命中率按输入 token 加权；缺失缓存字段不参与计算。\n"
+            "仅统计已落库主模型响应，不含摘要及未记录的失败请求，不等同于完整账单。[/dim]"
+        )
 
     @staticmethod
     def _memory_timeline(levels: tuple[int, ...]) -> Text:

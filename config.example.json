@@ -8,6 +8,12 @@
     "model": "deepseek-v4-flash[1M]",
     "max_output_tokens": 2000
   },
+  "tui": {
+    "notifications_enabled": true,
+    "prevent_sleep": true,
+    "usage_recent_messages": 20,
+    "system_command_timeout_seconds": 3
+  },
   "agent": {
     "tool_retry_max": 2,
     "tool_call_limit": 15,

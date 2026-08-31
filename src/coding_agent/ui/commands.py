@@ -32,6 +32,7 @@ def parse_command(text: str) -> ParsedCommand | None:
         "help": (0, 0),
         "history": (0, 1),
         "status": (0, 0),
+        "usage": (0, 1),
         "thread": (1, 1),
         "threads": (0, 0),
         "undo": (0, 1),

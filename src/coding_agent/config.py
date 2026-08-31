@@ -88,6 +88,23 @@ class AgentSettings:
 
 
 @dataclass(frozen=True)
+class TUISettings:
+    notifications_enabled: bool = True
+    prevent_sleep: bool = True
+    usage_recent_messages: int = 20
+    system_command_timeout_seconds: int = 3
+
+    def __post_init__(self) -> None:
+        for name in ("notifications_enabled", "prevent_sleep"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"tui.{name} must be a boolean")
+        for name in ("usage_recent_messages", "system_command_timeout_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"tui.{name} must be a positive integer")
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str = "mysql+pymysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     checkpoint_database_url: str = "mysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
@@ -96,6 +113,7 @@ class Settings:
     llm: LLMSettings = field(default_factory=LLMSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
+    tui: TUISettings = field(default_factory=TUISettings)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -126,6 +144,17 @@ def load_settings(path: str | Path | None = None) -> Settings:
     llm_raw = raw.get("llm", {})
     context_raw = raw.get("context", {})
     agent_raw = raw.get("agent", {})
+    tui_values = dict(raw.get("tui", {}))
+    for name, environment in (
+        ("notifications_enabled", "AGENT_NOTIFICATIONS_ENABLED"),
+        ("prevent_sleep", "AGENT_PREVENT_SLEEP"),
+    ):
+        default = tui_values.get(name, getattr(TUISettings, name))
+        if not isinstance(default, bool):
+            raise TypeError(f"tui.{name} must be a boolean")
+        tui_values[name] = _environment_bool(environment, default)
+    if "AGENT_USAGE_RECENT_MESSAGES" in os.environ:
+        tui_values["usage_recent_messages"] = int(os.environ["AGENT_USAGE_RECENT_MESSAGES"])
     agent_values = dict(agent_raw)
     configured_bash_enabled = agent_values.get("bash_enabled", AgentSettings.bash_enabled)
     if not isinstance(configured_bash_enabled, bool):
@@ -169,4 +198,5 @@ def load_settings(path: str | Path | None = None) -> Settings:
         llm=llm,
         context=ContextSettings(**context_raw),
         agent=AgentSettings(**agent_values),
+        tui=TUISettings(**tui_values),
     )

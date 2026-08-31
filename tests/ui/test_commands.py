@@ -28,3 +28,12 @@ def test_parse_command_rejects_unknown_or_invalid_commands():
 
 def test_plain_text_is_not_treated_as_a_command():
     assert parse_command("please inspect /src") is None
+
+
+def test_usage_command_accepts_optional_recent_count():
+    default = parse_command("/usage")
+    explicit = parse_command("/usage 50")
+    assert default is not None and default.argument is None
+    assert explicit is not None and explicit.argument == "50"
+    with pytest.raises(CommandParseError):
+        parse_command("/usage 50 extra")

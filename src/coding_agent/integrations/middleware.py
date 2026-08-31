@@ -84,26 +84,25 @@ class AgentRuntimeMiddleware(AgentMiddleware[Any, RunContext, Any]):
             return handler(request)
 
         response = self.call_limits.blocked_tool_result(context.budget, request)
-        mutation_id: int | None = None
         if response is None:
-            mutation_id = self.file_mutations.begin_for_tool(
+            with self.file_mutations.mutation_for_tool(
                 thread_id=context.thread_id,
                 user_seq=context.user_seq,
                 tool_call=request.tool_call,
-            )
-            try:
-                response = self.tool_execution.execute(request, handler)
-            except GraphBubbleUp:
-                self._finish_interrupted_mutation(mutation_id)
-                raise
-            except Exception:
-                self._finish_interrupted_mutation(mutation_id)
-                raise
-            if mutation_id is not None:
-                self.file_mutations.finish(
-                    mutation_id,
-                    succeeded=self._tool_succeeded(response),
-                )
+            ) as mutation_id:
+                try:
+                    response = self.tool_execution.execute(request, handler)
+                except GraphBubbleUp:
+                    self._finish_interrupted_mutation(mutation_id)
+                    raise
+                except Exception:
+                    self._finish_interrupted_mutation(mutation_id)
+                    raise
+                if mutation_id is not None:
+                    self.file_mutations.finish(
+                        mutation_id,
+                        succeeded=self._tool_succeeded(response),
+                    )
 
         if isinstance(response, ToolMessage):
             response = self._offload_tool_result(context, request, response)
