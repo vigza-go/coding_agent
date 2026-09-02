@@ -96,8 +96,8 @@ class AgentSettings:
             raise ValueError("bash_executable must not be empty")
         if not isinstance(self.search_enabled, bool):
             raise TypeError("search_enabled must be a boolean")
-        if self.search_enabled and not self.search_api_key.strip():
-            raise ValueError("search_api_key must be provided if search is enabled")
+        # 「开了搜索就要有 key」是跨字段不变量，而且凭证在构造期常常还不存在
+        # （测试、局部覆盖、只设了环境变量的场景），所以交给 make_search_client 判定。
 
 
 @dataclass(frozen=True)

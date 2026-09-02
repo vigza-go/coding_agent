@@ -24,9 +24,19 @@ __all__ = [
 
 
 def make_search_client(agent: AgentSettings) -> SearchClient | None:
-    """按配置装配搜索客户端；搜索关闭时返回 None，工具就不会注册。"""
+    """按配置装配搜索客户端；搜索关闭时返回 None，工具就不会注册。
+
+    凭证检查放在这里而不是 AgentSettings.__post_init__：构造期没有凭证是合法的
+    （测试、局部覆盖），但"开关打开却搜不了"必须是装配错误。
+    """
     if not agent.search_enabled:
         return None
+    if not agent.search_api_key.strip():
+        raise ValueError(
+            "agent.search_enabled is on but no search credential is available: set "
+            "AGENT_SEARCH_API_KEY / DASHSCOPE_API_KEY (or llm.api_key / agent.search_api_key "
+            "in the config file), or disable search with AGENT_SEARCH_ENABLED=false"
+        )
     return AliSearchClient(
         api_key=agent.search_api_key,
         timeout_seconds=agent.search_timeout_seconds,

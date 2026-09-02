@@ -4,16 +4,20 @@
 `enable_search` / `search_options` 暴露成 `Generation.call` 的一等参数，所以这里走
 SDK 而不是手搓 HTTP —— 手搓等于自己维护一份随时可能被上游改掉的私有协议。
 
-2026-09 实测到的三个约束：
+实测约束（2026-09，qwen-plus，逐条本地验证过）：
 
 - 结果条目只有 `title` / `url` / `site_name` / `icon` / `index`，**接口不返回正文片段**，
   所以本实现给不出 snippet；真要正文得换搜索服务或再抓取。
-- 返回条数由服务端决定（实测请求 10 条只回 9 条），`max_results` 只能在本地截断。
+- `search_options.enable_source` 是**唯一决定 `search_results` 是否出现**的参数。不传它时
+  搜索照样执行（`usage.plugins.search.count=1`）、HTTP 照样返回 200、回答照样流畅，但来源
+  为空 —— 这是最危险的静默形状：等于把模型自身知识包装成"搜索结果"喂回上下文。
+- `search_options.max_results` 服务端**不生效**（传 1 / 2 / 10 都稳定返回 9 条），条数只能在
+  本地截断；`forced_search` 在这组实验里没有可观测差异，仅作为"即使模型自认为知道也强制查"
+  的保险保留，真正 load-bearing 的是 `enable_source`。
+- 一次搜索固定注入约 4.3k **input** tokens（4380 vs 不搜索时 17），且不随 `max_results` 变化。
+  这是搜索工具的真实预算成本，会直接挤占工作区、影响压缩触发点。
 - 网络与超时错误由 SDK **抛异常**（默认超时 300 秒），必须显式传 `request_timeout`
   才有超时保护；失败不会以错误对象的形式返回。
-
-不开 `forced_search` 时模型照样会给出"看起来像查过"的回答（实测凭空编出过某天的天气
-并自称来自气象局），因此没有来源一律判失败，绝不把模型自身知识包装成搜索结果。
 """
 
 from __future__ import annotations
@@ -70,6 +74,8 @@ class AliSearchClient:
                 messages=[{"role": "user", "content": query}], # type: ignore
                 result_format="message",
                 enable_search=True,
+                # enable_source 缺省时服务端会静默返回 200 + 流畅回答但零来源，绝不能省。
+                # 故意不传 max_results：实测服务端忽略它，写了只会误导后来的维护者。
                 search_options={"forced_search": True, "enable_source": True},
                 request_timeout=self.timeout_seconds,
             )
