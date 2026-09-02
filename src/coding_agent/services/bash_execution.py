@@ -4,10 +4,18 @@ import os
 import signal
 import subprocess
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from io import BufferedReader
 from pathlib import Path
 from threading import Condition, Thread
 from time import monotonic
+from typing import cast
+
+# How long to wait for the output reader to hit a real EOF after the command exits.
+# A backgrounded process can keep the pipe's write end open indefinitely, so this is
+# a bound on patience, not a guess about command duration.
+_OUTPUT_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -105,12 +113,27 @@ class BashExecutionService:
         def drain_output() -> None:
             nonlocal truncated
             assert process.stdout is not None
-            while chunk := process.stdout.read(8192):
-                remaining = self.max_output_bytes - len(captured)
-                if remaining > 0:
-                    captured.extend(chunk[:remaining])
-                if len(chunk) > remaining:
-                    truncated = True
+            # Popen.stdout is annotated as IO[bytes], which has no read1(); with
+            # stdout=PIPE the runtime object really is a BufferedReader, the only stream
+            # type that offers a partial read. Restate it here instead of loosening the
+            # read loop with a blanket ignore.
+            stream = cast("BufferedReader", process.stdout)
+            try:
+                # read1() returns whatever has already arrived after a single raw read.
+                # BufferedReader.read(n) instead blocks until it has n bytes or hits EOF,
+                # which would strand already-produced output inside the buffer whenever a
+                # backgrounded process keeps the pipe's write end open forever.
+                while chunk := stream.read1(8192):
+                    remaining = self.max_output_bytes - len(captured)
+                    if remaining > 0:
+                        captured.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        truncated = True
+            finally:
+                # This thread is the only reader, so it also owns closing the pipe.
+                # Closing it from the caller would deadlock: BufferedReader.close() needs
+                with suppress(OSError):
+                    stream.close()
 
         reader = Thread(target=drain_output, name="coding-agent-bash-output", daemon=True)
         reader.start()
@@ -123,9 +146,15 @@ class BashExecutionService:
             process.wait()
             exit_code = 124
         finally:
-            reader.join()
-            if process.stdout is not None:
-                process.stdout.close()
+            # The command already returned, so read() can only still be blocked because
+            # some process we deliberately left running inherited the pipe's write end.
+            # Wait a bounded moment, then stop waiting: the daemon thread exits by itself
+            # once every writer is gone, and it closes the fd on the way out.
+            reader.join(timeout=_OUTPUT_GRACE_SECONDS)
+            if reader.is_alive():
+                # Later output belongs to a live background process. Surface it through
+                # the existing flag instead of hanging this tool call forever.
+                truncated = True
             with self._process_condition:
                 interrupted = process.pid in self._interrupted_processes
                 self._interrupted_processes.discard(process.pid)
