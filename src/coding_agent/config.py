@@ -68,6 +68,13 @@ class AgentSettings:
     bash_executable: str = "/bin/bash"
     bash_timeout_seconds: int = 120
     bash_max_output_bytes: int = 100_000
+    # 配置面只暴露「开关 + 凭证 + 与供应商无关的行为参数」。endpoint / model 属于
+    # 具体实现，留在 SearchClient 内部，将来换搜索服务时不用动配置契约。
+    # 默认关闭：搜索需要外部凭证，不像 Bash 那样开箱可用。
+    search_enabled: bool = True
+    search_api_key: str = ""
+    search_timeout_seconds: int = 500
+    search_max_results_limit: int = 10
 
     def __post_init__(self) -> None:
         positive_values = {
@@ -77,6 +84,8 @@ class AgentSettings:
             "filesystem_max_file_size_mb": self.filesystem_max_file_size_mb,
             "bash_timeout_seconds": self.bash_timeout_seconds,
             "bash_max_output_bytes": self.bash_max_output_bytes,
+            "search_timeout_seconds": self.search_timeout_seconds,
+            "search_max_results_limit": self.search_max_results_limit,
         }
         for name, value in positive_values.items():
             if value < 1:
@@ -85,6 +94,10 @@ class AgentSettings:
             raise TypeError("bash_enabled must be a boolean")
         if not self.bash_executable.strip():
             raise ValueError("bash_executable must not be empty")
+        if not isinstance(self.search_enabled, bool):
+            raise TypeError("search_enabled must be a boolean")
+        if self.search_enabled and not self.search_api_key.strip():
+            raise ValueError("search_api_key must be provided if search is enabled")
 
 
 @dataclass(frozen=True)
@@ -156,20 +169,27 @@ def load_settings(path: str | Path | None = None) -> Settings:
     if "AGENT_USAGE_RECENT_MESSAGES" in os.environ:
         tui_values["usage_recent_messages"] = int(os.environ["AGENT_USAGE_RECENT_MESSAGES"])
     agent_values = dict(agent_raw)
-    configured_bash_enabled = agent_values.get("bash_enabled", AgentSettings.bash_enabled)
-    if not isinstance(configured_bash_enabled, bool):
-        raise TypeError("agent.bash_enabled must be a boolean")
-    agent_values["bash_enabled"] = _environment_bool("AGENT_BASH_ENABLED", configured_bash_enabled)
+    for field_name, environment_name in (
+        ("bash_enabled", "AGENT_BASH_ENABLED"),
+        ("search_enabled", "AGENT_SEARCH_ENABLED"),
+    ):
+        default = agent_values.get(field_name, getattr(AgentSettings, field_name))
+        if not isinstance(default, bool):
+            raise TypeError(f"agent.{field_name} must be a boolean")
+        agent_values[field_name] = _environment_bool(environment_name, default)
+    string_agent_fields = frozenset({"bash_executable"})
     environment_agent_fields = {
         "bash_executable": "AGENT_BASH_EXECUTABLE",
         "bash_timeout_seconds": "AGENT_BASH_TIMEOUT_SECONDS",
         "bash_max_output_bytes": "AGENT_BASH_MAX_OUTPUT_BYTES",
+        "search_timeout_seconds": "AGENT_SEARCH_TIMEOUT_SECONDS",
+        "search_max_results_limit": "AGENT_SEARCH_MAX_RESULTS_LIMIT",
     }
     for field_name, environment_name in environment_agent_fields.items():
         environment_value = os.getenv(environment_name)
         if environment_value is not None:
             agent_values[field_name] = (
-                environment_value if field_name == "bash_executable" else int(environment_value)
+                environment_value if field_name in string_agent_fields else int(environment_value)
             )
 
     workspace = Path(os.getenv("WORKSPACE_ROOT", raw.get("workspace_root", "."))).resolve()
@@ -186,6 +206,14 @@ def load_settings(path: str | Path | None = None) -> Settings:
                 llm_raw.get("max_output_tokens", llm_raw.get("max_tokens", 2_000)),
             )
         ),
+    )
+    # DashScope 的模型与联网搜索共用同一把 key，所以允许回落到 llm.api_key，
+    # 省掉在配置里把同一个值抄两遍。
+    agent_values["search_api_key"] = (
+        os.getenv("AGENT_SEARCH_API_KEY")
+        or os.getenv("DASHSCOPE_API_KEY")
+        or agent_raw.get("search_api_key", "")
+        or llm.api_key
     )
     return Settings(
         database_url=os.getenv("DATABASE_URL", raw.get("database_url", Settings.database_url)),

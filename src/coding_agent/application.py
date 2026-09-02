@@ -16,6 +16,7 @@ from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
 from .integrations.langchain_agent import build_model, create_langchain_agent
 from .integrations.middleware import RunContext
+from .integrations.search import make_search_client
 from .persistence.database import Database
 from .persistence.message_codec import decode_message, encode_message
 from .persistence.models import MessageType
@@ -55,6 +56,7 @@ class ThreadStatus:
     working_tokens: int
     working_trigger: int
     bash_enabled: bool
+    search_enabled: bool
     work_state: dict[str, Any] | None
 
 
@@ -243,6 +245,7 @@ class AgentApplication:
                 working_tokens=usage.working_tokens,
                 working_trigger=self.settings.context.working_trigger,
                 bash_enabled=self.settings.agent.bash_enabled,
+                search_enabled=self.settings.agent.search_enabled,
                 work_state=snapshot.state_json if snapshot is not None else None,
             )
 
@@ -264,6 +267,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         if settings.agent.bash_enabled
         else None
     )
+    search_client = make_search_client(settings.agent)
     with create_langchain_agent(
         settings=settings,
         database=database,
@@ -271,6 +275,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         recorder=recorder,
         model=model,
         bash_executor=bash_executor,
+        search_client=search_client,
     ) as agent:
         yield AgentApplication(
             settings,

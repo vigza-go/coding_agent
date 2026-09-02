@@ -26,6 +26,7 @@ from ..workspace.artifacts import ArtifactStore
 from ..workspace.file_undo import FileMutationRecorder
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
+from .search import SearchClient
 
 
 class RuntimeState(AgentState):
@@ -60,6 +61,23 @@ def make_work_state_tool(database: Database, context_engine: ContextEngine):
     return update_work_state
 
 
+def make_search_tool(client: SearchClient):
+    @tool("search_tool", parse_docstring=True)
+    def search_tool(query: str, max_results: int = 3) -> str:
+        """联网搜索实时信息，返回远端回答与来源链接列表。
+
+        用于查询实时信息、最新版本号、或本地记忆未覆盖的知识。注意该接口只返回标题和
+        URL，不返回网页正文；answer 由远端搜索增强模型给出，重要事实需按 sources 自行核验。
+
+        Args:
+            query: 搜索关键词，应简洁明确。
+            max_results: 期望返回的来源条数，超过服务端配置上限会被收敛。
+        """
+
+        return client.search(query, max_results=max_results).render()
+
+    return search_tool
+
 @contextmanager
 def create_langchain_agent(
     *,
@@ -69,6 +87,7 @@ def create_langchain_agent(
     recorder: FileMutationRecorder,
     model: ChatAnthropic,
     bash_executor: BashExecutionService | None,
+    search_client: SearchClient | None,
 ) -> Generator[Any, None, None]:
     filesystem = FilesystemMiddleware(
         backend=FilesystemBackend(
@@ -86,7 +105,9 @@ def create_langchain_agent(
         ),
         tool_execution=ToolExecutionService(
             max_retries=settings.agent.tool_retry_max,
-            retryable_tools=["ls", "read_file", "glob", "grep", "write_file"],
+            # search_tool 是只读幂等的远端查询，和网络抖动都值得重试；
+            # edit_file / delete / bash 有副作用，仍然只执行一次。
+            retryable_tools=["ls", "read_file", "glob", "grep", "write_file", "search_tool"],
         ),
         artifacts=ArtifactStore(settings.artifact_dir),
         file_mutations=recorder,
@@ -103,6 +124,11 @@ def create_langchain_agent(
             "文件工具的虚拟路径。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "
             "/undo 恢复。不要把存在读写依赖的 Bash 和文件操作放进同一批工具调用。"
         )
+    if settings.agent.search_enabled:
+        if search_client is None:
+            raise RuntimeError("search is enabled but no SearchClient was provided")
+        tools.append(make_search_tool(search_client))
+
     with PyMySQLSaver.from_conn_string(settings.checkpoint_database_url) as checkpointer:
         checkpointer.setup()
         middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]

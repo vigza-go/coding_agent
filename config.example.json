@@ -22,7 +22,10 @@
     "bash_enabled": true,
     "bash_executable": "/bin/bash",
     "bash_timeout_seconds": 120,
-    "bash_max_output_bytes": 100000
+    "bash_max_output_bytes": 100000,
+    "search_enabled": false,
+    "search_timeout_seconds": 500,
+    "search_max_results_limit": 10
   },
   "context": {
     "total_tokens": 1000000,
