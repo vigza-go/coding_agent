@@ -12,6 +12,7 @@ from rich.console import Console
 
 from coding_agent.application import TurnExecutionError
 from coding_agent.config import Settings, TUISettings
+from coding_agent.services.progress import TurnEvent, TurnEventKind
 from coding_agent.services.usage import RecentUsage
 from coding_agent.ui import tui
 from coding_agent.ui.commands import CommandParseError, ParsedCommand
@@ -128,3 +129,17 @@ def test_usage_empty_data_is_not_reported_as_zero_percent(monkeypatch, samples):
     ui._show_usage(20)
     assert "0.0%" not in output.getvalue()
     assert "暂无可计算数据" in output.getvalue() if samples else "还没有" in output.getvalue()
+
+
+def test_mid_turn_prose_reaches_the_console(monkeypatch):
+    ui, _app, output, _ = make_ui(monkeypatch)
+    ui._render_event(Mock(), TurnEvent(TurnEventKind.MODEL_FINISHED, text="先解释一句再动手"))
+
+    assert "先解释一句再动手" in output.getvalue()
+
+
+def test_model_finished_without_prose_prints_nothing(monkeypatch):
+    ui, _app, output, _ = make_ui(monkeypatch)
+    ui._render_event(Mock(), TurnEvent(TurnEventKind.MODEL_FINISHED))
+
+    assert output.getvalue() == ""

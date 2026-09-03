@@ -24,6 +24,27 @@ class TurnEvent:
     kind: TurnEventKind
     name: str | None = None
     detail: str | None = None
+    text: str | None = None
+
+
+def _mid_turn_text(response: Any) -> str | None:
+    """Pull the model's own prose out of a finished call, but only when it kept working.
+
+    Only messages that go on to issue tool calls are reported. `run_turn` hands the
+    final answer back separately (last AI message without tool calls) and the TUI
+    renders it as its own panel, so reporting it here would print it twice. The same
+    gate keeps the compaction summarizer's plain-text replies out of the transcript.
+    """
+    parts: list[str] = []
+    for generation_list in getattr(response, "generations", None) or []:
+        for generation in generation_list:
+            message = getattr(generation, "message", None)
+            if message is None or not getattr(message, "tool_calls", None):
+                continue
+            text = (getattr(message, "text", "") or "").strip()
+            if text:
+                parts.append(text)
+    return "\n\n".join(parts) or None
 
 
 class TurnEventGate:
@@ -55,8 +76,8 @@ class ProgressCallbackHandler(BaseCallbackHandler):
         self.emit(TurnEvent(TurnEventKind.MODEL_STARTED))
 
     def on_llm_end(self, response, **kwargs):
-        del response, kwargs
-        self.emit(TurnEvent(TurnEventKind.MODEL_FINISHED))
+        del kwargs
+        self.emit(TurnEvent(TurnEventKind.MODEL_FINISHED, text=_mid_turn_text(response)))
 
     def on_tool_start(
         self,

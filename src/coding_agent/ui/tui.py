@@ -199,15 +199,7 @@ class TerminalUI:
             self.console.print("[yellow]本轮没有最终文本回复。[/yellow]")
             return
         if self.renderer.text(answer.content):
-            self.console.print(
-                Panel(
-                    self.renderer.markdown(answer.content),
-                    title="Agent",
-                    title_align="left",
-                    border_style="blue",
-                    padding=(0, 1),
-                )
-            )
+            self._print_agent_text(answer.content)
         else:
             self.console.print("[yellow]模型回复中没有可显示的文本内容。[/yellow]")
         self._notify_turn("本轮完成", started_at)
@@ -219,10 +211,30 @@ class TerminalUI:
         if not self.desktop.notify(f"会话 {self.thread_id} · {outcome} · {elapsed:.1f} 秒"):
             self.console.bell()
 
+    def _print_agent_text(self, content: object) -> None:
+        """Render one block of model prose as an Agent panel.
+
+        Shared by mid-turn prose and the final answer. Previously only the final answer
+        had a path to the console, so every explanation the model wrote alongside a tool
+        call was silently dropped and the user saw just the last message of the turn.
+        """
+
+        self.console.print(
+            Panel(
+                self.renderer.markdown(content),
+                title="Agent",
+                title_align="left",
+                border_style="blue",
+                padding=(0, 1),
+            )
+        )
+
     def _render_event(self, status: Status, event: TurnEvent) -> None:
         if event.kind == TurnEventKind.MODEL_STARTED:
             status.update("[cyan]模型思考中…[/cyan]")
         elif event.kind == TurnEventKind.MODEL_FINISHED:
+            if event.text:
+                self._print_agent_text(event.text)
             status.update("[cyan]正在处理模型结果…[/cyan]")
         elif event.kind == TurnEventKind.TOOL_STARTED:
             detail = f" [dim]{markup_escape(event.detail)}[/dim]" if event.detail else ""
