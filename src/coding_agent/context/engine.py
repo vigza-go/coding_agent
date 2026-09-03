@@ -23,6 +23,7 @@ from .cover import ContextPiece
 from .records import MemoryBlockSnapshot, MessageSnapshot, WorkStateView
 from .summarizer import RetryingSummarizer, Summarizer
 from .tokens import estimate_tokens
+from .work_state import READ_OPS, apply_op
 
 
 class CompressionInvariantError(RuntimeError):
@@ -72,6 +73,35 @@ class ContextEngine:
 
     def current_work_state(self, thread_id: str) -> WorkStateView | None:
         return self.cache.current_work_state(thread_id)
+
+    def mutate_work_state(
+        self, thread_id: str, user_seq: int, op: str, key: str | None, value: str | None
+    ) -> str:
+        """在一次持锁期内完成「读最新→改→写回」，返回给模型的回执。
+
+        框架会**并行执行同一批工具调用**，而 `apply_op` 是 read-modify-write：
+        没有这把锁时两个并发写从同一基线出发、各插一行，后插那行整份覆盖前者——
+        实测 8 线程 × 10 轮只活下 19/80 个键，且**零异常**（静默丢状态）。
+        校验失败在 `apply_op` 内抛出，发生在写之前，所以坏参数不会留下半改状态。
+
+        边界：这把锁是**进程内**的。多进程同写一个 thread 仍会丢，与派生缓存本身
+        的已知限制一致（见 README「进程内缓存不支持多进程」）。
+        """
+
+        with self.cache.locked(thread_id):
+            with self.database.session() as session:
+                repo = AgentRepository(session)
+                row = repo.latest_work_state(thread_id)
+                state, receipt = apply_op(
+                    row.state_json if row is not None else {}, op, key, value
+                )
+                saved = None
+                if op not in READ_OPS:
+                    saved = repo.save_work_state(thread_id, user_seq, state)
+            # 只读操作不落库，也就不会产生新快照，派生缓存保持原样。
+            if saved is not None:
+                self.cache.update_work_state(thread_id, saved)
+        return receipt
 
     def invalidate(self, thread_id: str) -> None:
         self.cache.invalidate(thread_id)

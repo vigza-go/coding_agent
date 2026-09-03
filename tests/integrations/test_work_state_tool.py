@@ -21,7 +21,7 @@ from coding_agent.persistence.models import WorkStateSnapshot
 
 def make_tool(database):
     engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
-    return make_work_state_tool(database, engine), engine
+    return make_work_state_tool(engine), engine
 
 
 def invoke(tool, thread_id: str = "t1", user_seq: int = 1, **args) -> str:

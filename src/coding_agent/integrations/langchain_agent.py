@@ -14,11 +14,9 @@ from langgraph.config import get_config
 
 from ..config import Settings
 from ..context.engine import ContextEngine
-from ..context.work_state import READ_OPS, WorkStateError, apply_op
+from ..context.work_state import WorkStateError
 from ..persistence.checkpoint_connection import open_checkpointer
 from ..persistence.database import Database
-from ..persistence.models import WorkStateSnapshot
-from ..persistence.repository import AgentRepository
 from ..services.bash_execution import BashExecutionService
 from ..services.call_limits import CallLimitService
 from ..services.context_projection import ContextProjectionService
@@ -47,7 +45,7 @@ def build_model(settings: Settings) -> ChatAnthropic:
     )
 
 
-def make_work_state_tool(database: Database, context_engine: ContextEngine):
+def make_work_state_tool(context_engine: ContextEngine):
     @tool("work_state", parse_docstring=True)
     def work_state(op: str, key: str = "", value: str = "") -> str:
         """对当前工作状态做一次字典操作；状态是 {键: markdown 字符串} 的扁平结构。
@@ -65,20 +63,14 @@ def make_work_state_tool(database: Database, context_engine: ContextEngine):
         configurable = get_config().get("configurable", {})
         thread_id = str(configurable["thread_id"])
         user_seq = int(configurable["user_seq"])
-        saved: WorkStateSnapshot | None = None
+        # RMW 必须整体跑在 engine 的 thread 锁里：框架并行执行同一批工具，
+        # 无锁时实测 8 线程 × 10 轮只活下 19/80 个键，且零异常。
         try:
-            with database.session() as session:
-                repo = AgentRepository(session)
-                row = repo.latest_work_state(thread_id)
-                stored = row.state_json if row is not None else {}
-                state, receipt = apply_op(stored, op, key or None, value or None)
-                if op not in READ_OPS:
-                    saved = repo.save_work_state(thread_id, user_seq, state)
+            return context_engine.mutate_work_state(
+                thread_id, user_seq, op, key or None, value or None
+            )
         except WorkStateError as error:
             return f"Error: {error}"
-        if saved is not None:
-            context_engine.update_work_state(thread_id, saved)
-        return receipt
 
     return work_state
 
@@ -135,7 +127,7 @@ def create_langchain_agent(
         file_mutations=recorder,
         tool_result_inline_tokens=settings.context.tool_result_inline_tokens,
     )
-    tools = [make_work_state_tool(database, context_engine)]
+    tools = [make_work_state_tool(context_engine)]
     bash_prompt = ""
     if settings.agent.bash_enabled:
         if bash_executor is None:
