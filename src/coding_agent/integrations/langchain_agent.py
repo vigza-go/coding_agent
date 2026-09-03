@@ -14,8 +14,10 @@ from langgraph.config import get_config
 
 from ..config import Settings
 from ..context.engine import ContextEngine
+from ..context.work_state import READ_OPS, WorkStateError, apply_op
 from ..persistence.checkpoint_connection import open_checkpointer
 from ..persistence.database import Database
+from ..persistence.models import WorkStateSnapshot
 from ..persistence.repository import AgentRepository
 from ..services.bash_execution import BashExecutionService
 from ..services.call_limits import CallLimitService
@@ -46,19 +48,39 @@ def build_model(settings: Settings) -> ChatAnthropic:
 
 
 def make_work_state_tool(database: Database, context_engine: ContextEngine):
-    @tool
-    def update_work_state(state: dict[str, Any]) -> str:
-        """保存当前工作状态；state 应包含目标、进展、约束和下一步。"""
+    @tool("work_state", parse_docstring=True)
+    def work_state(op: str, key: str = "", value: str = "") -> str:
+        """对当前工作状态做一次字典操作；状态是 {键: markdown 字符串} 的扁平结构。
+
+        一次调用只付一个键的成本，不要为了改一行而重打整份状态。键名以 ``!``
+        开头表示钉住（常驻注入）。值用 markdown，不要传嵌套结构。常见用法是
+        ``append`` 往一个键追加一条 bullet。
+
+        Args:
+            op: 操作名，取 list / get / set / append / delete / clear。
+            key: 目标键名；list 与 clear 之外都必填。
+            value: markdown 正文；仅 set / append 需要。
+        """
 
         configurable = get_config().get("configurable", {})
         thread_id = str(configurable["thread_id"])
         user_seq = int(configurable["user_seq"])
-        with database.session() as session:
-            snapshot = AgentRepository(session).save_work_state(thread_id, user_seq, state)
-        context_engine.update_work_state(thread_id, snapshot)
-        return "工作状态已保存。"
+        saved: WorkStateSnapshot | None = None
+        try:
+            with database.session() as session:
+                repo = AgentRepository(session)
+                row = repo.latest_work_state(thread_id)
+                stored = row.state_json if row is not None else {}
+                state, receipt = apply_op(stored, op, key or None, value or None)
+                if op not in READ_OPS:
+                    saved = repo.save_work_state(thread_id, user_seq, state)
+        except WorkStateError as error:
+            return f"Error: {error}"
+        if saved is not None:
+            context_engine.update_work_state(thread_id, saved)
+        return receipt
 
-    return update_work_state
+    return work_state
 
 
 def make_search_tool(client: SearchClient):
