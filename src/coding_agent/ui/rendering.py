@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from markdown_it import MarkdownIt
 from rich.markdown import Markdown
 from rich.theme import Theme
 
@@ -13,6 +14,45 @@ TUI_THEME = Theme(
         "markdown.code_block": "none",
     }
 )
+
+
+class LiteralMarkdown(Markdown):
+    """Markdown that keeps literal HTML-like text instead of silently dropping it.
+
+    Rich's default renderer discards raw HTML (html_inline / html_block tokens),
+    so agent prose such as ``<w></w>`` or ``</parameter>`` disappeared from the TUI
+    while the full text was still stored in the database. Disabling markdown-it's
+    HTML rules makes those sequences render verbatim as ordinary text (markdown
+    headings, bold, code spans and fenced code keep working as before).
+    """
+
+    def __init__(
+        self,
+        markup: str,
+        code_theme: str = "monokai",
+        justify=None,
+        style="none",
+        hyperlinks: bool = True,
+        inline_code_lexer: str | None = None,
+        inline_code_theme: str | None = None,
+    ) -> None:
+        # Mirror rich.markdown.Markdown.__init__, but disable the HTML rules so that
+        # tags are parsed as text rather than dropped during rendering.
+        parser = (
+            MarkdownIt()
+            .disable("html_block")
+            .disable("html_inline")
+            .enable("strikethrough")
+            .enable("table")
+        )
+        self.markup = markup
+        self.parsed = parser.parse(markup)
+        self.code_theme = code_theme
+        self.justify = justify
+        self.style = style
+        self.hyperlinks = hyperlinks
+        self.inline_code_lexer = inline_code_lexer
+        self.inline_code_theme = inline_code_theme or code_theme
 
 
 class ContentRenderer:
@@ -30,7 +70,7 @@ class ContentRenderer:
         return text[:limit].rstrip() + "…"
 
     def markdown(self, content: Any) -> Markdown:
-        return Markdown(self.text(content), code_theme="ansi_light")
+        return LiteralMarkdown(self.text(content), code_theme="ansi_light")
 
     def _extract(self, content: Any) -> str:
         if isinstance(content, str):
