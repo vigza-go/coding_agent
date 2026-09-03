@@ -187,6 +187,8 @@ TUI 命令：
 
 数据库侧的一些细节：主键用 `BigInteger().with_variant(Integer, "sqlite")`（SQLite 的自增只对 `INTEGER PRIMARY KEY` 生效，而 MySQL 需要 BIGINT），因此测试可以完全跑在 SQLite 上、无需外部数据库；blob 列 `LargeBinary(length=16_777_215)` 精确对应 MEDIUMBLOB 上限。
 
+**联网搜索**是可选的外部依赖，配置面只有四项：`search_enabled` / `search_api_key`（缺省回落到 `llm.api_key`）/ `search_timeout_seconds` / `search_max_results_limit`。端点与模型名属于实现内部——换搜索引擎只需新增一个 client 实现并改工厂一行，配置契约与调用方都不动。当前实现接的是 DashScope 的**生成期搜索插件**（该服务没有独立搜索 API），实测**只返回标题与 URL，不返回网页正文**；所以工具结果里的 `answer` 出自远端搜索增强模型，需按 sources 自行核验。服务端返回 200 却不给来源是一种静默失败形状，因此"无来源"一律判为失败而非成功。
+
 ---
 
 ## 测试

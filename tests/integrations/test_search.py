@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from coding_agent.config import AgentSettings, load_settings
+from coding_agent.config import AgentSettings, Settings, load_settings
 from coding_agent.integrations.langchain_agent import make_search_tool
 from coding_agent.integrations.search import (
     AliSearchClient,
@@ -69,6 +69,19 @@ def make_client(search_call, **overrides) -> AliSearchClient:
     return AliSearchClient(search_call=search_call, **options)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_search_environment(monkeypatch):
+    """配置层断言不能被开发机上的 export 污染，先一律清空。"""
+    for name in (
+        "AGENT_SEARCH_ENABLED",
+        "AGENT_SEARCH_API_KEY",
+        "AGENT_SEARCH_TIMEOUT_SECONDS",
+        "AGENT_SEARCH_MAX_RESULTS_LIMIT",
+        "DASHSCOPE_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_search_returns_answer_and_sources():
     call = RecordingCall()
 
@@ -82,19 +95,39 @@ def test_search_returns_answer_and_sources():
     assert result.sources[0]["site_name"] == "site-1"
 
 
-def test_search_forces_remote_search_and_bounds_the_request_timeout():
+def test_search_sends_the_load_bearing_options_and_bounds_the_request_timeout():
     call = RecordingCall()
 
     make_client(call, timeout_seconds=23).search("任意查询")
 
     kwargs = call.calls[0]
     assert kwargs["enable_search"] is True
-    # 不强制搜索，远端可能根本没查，却仍返回一个"像是查过"的回答。
-    assert kwargs["search_options"]["forced_search"] is True
     assert kwargs["result_format"] == "message"
     assert kwargs["api_key"] == "test-key"
     # SDK 默认超时是 300 秒，不显式传就等于没有超时保护。
     assert kwargs["request_timeout"] == 23
+
+
+def test_enable_source_is_sent_because_its_absence_is_silent():
+    """实测：不传 enable_source 时搜索仍执行、HTTP 仍 200，但 search_results 为空。
+
+    那个形状下模型会给出一段"像是查过"的回答，却没有可核验出处。所以这个参数是
+    load-bearing 的，用测试钉住它不被当成"看着多余的字段"清理掉。
+    """
+    call = RecordingCall()
+
+    make_client(call).search("q")
+
+    assert call.calls[0]["search_options"]["enable_source"] is True
+
+
+def test_max_results_is_not_forwarded_because_the_server_ignores_it():
+    """实测传 1 / 2 / 10 都稳定返回 9 条：条数只能本地截断，不伪造远程参数。"""
+    call = RecordingCall()
+
+    make_client(call).search("q", max_results=2)
+
+    assert "max_results" not in call.calls[0]["search_options"]
 
 
 def test_search_clamps_max_results_to_configured_limit():
@@ -243,14 +276,28 @@ def test_search_api_key_falls_back_to_llm_api_key(tmp_path, monkeypatch):
     assert settings.agent.search_api_key == "shared-dashscope-key"
 
 
-def test_search_is_off_by_so_no_key_is_needed(tmp_path, monkeypatch):
-    """默认关闭，否则没有 dashscope key 的人连项目都启动不了。"""
+def test_settings_construct_fine_without_any_credential(tmp_path, monkeypatch):
+    """构造期不得索要凭证——否则每个默认构造 Settings() 的测试都会被拖下水。
+
+    这条同时是那次 16 个 tui 测试集体失败的回归守卫：跨字段校验一旦搬回
+    AgentSettings.__post_init__，这里就会红。
+    """
     for name in ("AGENT_SEARCH_API_KEY", "DASHSCOPE_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     config = tmp_path / "config.json"
     config.write_text("{}", encoding="utf-8")
 
-    assert load_settings(config).agent.search_enabled is False
+    settings = load_settings(config)
+
+    assert settings.agent.search_api_key == ""
+    assert Settings()  # 默认构造必须无条件成立
+    assert make_search_client(AgentSettings(search_enabled=True, search_api_key="k"))
+
+
+def test_factory_raises_actionably_when_enabled_without_key():
+    """开关打开却没凭证：在装配点报错，并直接说出怎么关掉。"""
+    with pytest.raises(ValueError, match="no search credential"):
+        make_search_client(AgentSettings(search_enabled=True, search_api_key="   "))
 
 
 def test_search_env_overrides_config_file(tmp_path, monkeypatch):
@@ -267,10 +314,6 @@ def test_search_env_overrides_config_file(tmp_path, monkeypatch):
     assert agent.search_max_results_limit == 5
 
 
-def test_enabled_search_requires_key_at_settings_level():
-    with pytest.raises(ValueError, match="if search is enabled"):
-        AgentSettings(search_enabled=True, search_api_key="")
-
-
 def test_disabled_search_needs_no_key():
-    assert AgentSettings(search_enabled=False, search_api_key="").search_enabled is False
+    """关掉搜索就不该要凭证：工厂安静返回 None，工具不注册。"""
+    assert make_search_client(AgentSettings(search_enabled=False, search_api_key="")) is None

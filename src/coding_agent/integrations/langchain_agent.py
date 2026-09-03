@@ -10,11 +10,11 @@ from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
-from langgraph.checkpoint.mysql.pymysql import PyMySQLSaver
 from langgraph.config import get_config
 
 from ..config import Settings
 from ..context.engine import ContextEngine
+from ..persistence.checkpoint_connection import open_checkpointer
 from ..persistence.database import Database
 from ..persistence.repository import AgentRepository
 from ..services.bash_execution import BashExecutionService
@@ -129,7 +129,7 @@ def create_langchain_agent(
             raise RuntimeError("search is enabled but no SearchClient was provided")
         tools.append(make_search_tool(search_client))
 
-    with PyMySQLSaver.from_conn_string(settings.checkpoint_database_url) as checkpointer:
+    with open_checkpointer(settings.checkpoint_database_url) as checkpointer:
         checkpointer.setup()
         middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]
         yield create_agent(
