@@ -16,7 +16,7 @@ from .cache import ThreadContextCache, ThreadContextState
 from .compaction import (
     atomic_message_units,
     message_tokens,
-    render_message,
+    sanitize_transcript,
     split_atomic_units_token_balanced,
 )
 from .cover import ContextPiece
@@ -201,7 +201,7 @@ class ContextEngine:
     def _summarize_l0_chunk(
         self, chunk: list[MessageSnapshot]
     ) -> tuple[list[MessageSnapshot], str, int]:
-        source = "\n".join(render_message(message) for message in chunk)
+        source = sanitize_transcript(chunk)
         source_tokens = sum(message_tokens(message) for message in chunk)
         hard_limit = max(1, math.floor(source_tokens * self.settings.summary_target_ratio))
         summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=0)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
+from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from ..context.cover import ContextPiece
@@ -42,6 +42,7 @@ class ContextProjectionService:
         pieces = self.context_engine.rebuild(thread_id)
         projected = self.render_pieces(pieces)
         snapshot = self.context_engine.current_work_state(thread_id)
+        state_messages: list[BaseMessage] = []
         if snapshot is not None:
             body = (
                 render_index(snapshot.state_json)
@@ -49,11 +50,13 @@ class ContextProjectionService:
                 else render(snapshot.state_json)
             )
             self._sent_state_id[thread_id] = snapshot.id
-            projected.append(
-                HumanMessage(
+            # 工作状态是系统侧背景，不是用户本轮说的话。之前把它包成 HumanMessage 追加在
+            # 会话末尾，会让模型误以为末尾那段 <current_work_state> 是"最新用户指令"，把真正
+            # 的提问顶到前面。改为 SystemMessage 并放在最前，使对话以真实用户提问收尾。
+            state_messages.append(
+                SystemMessage(
                     id=f"work-state-{snapshot.id}",
-                    name="work_state",
                     content=f"<current_work_state>\n{body}\n</current_work_state>",
                 )
             )
-        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *projected]
+        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *state_messages, *projected]

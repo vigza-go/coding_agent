@@ -92,10 +92,20 @@ def test_notification_passes_text_as_data_not_script(mac_helpers):
     message = 'thread "x"; $(touch /not-a-command)\n任务已完成'
     assert DesktopService(TUISettings(), Mock()).notify(message)
     arguments = run.call_args.args[0]
-    assert arguments[-1] == message
+    assert arguments[-1] == "Glass"  # 声音名在末尾，仍作为独立参数
+    assert message in arguments[3:]  # message 是独立参数，不进入 AppleScript 脚本
     assert message not in arguments[2]
     assert run.call_args.kwargs["timeout"] == 3
     assert not run.call_args.kwargs.get("shell", False)
+
+
+def test_notification_sound_can_be_disabled(mac_helpers):
+    _, _, run = mac_helpers
+    service = DesktopService(TUISettings(notification_sound=""), Mock())
+    assert service.notify("done")
+    arguments = run.call_args.args[0]
+    assert "sound name" not in arguments[2]  # 空声音名走无声音脚本
+    assert len(arguments) == 4
 
 
 def test_notification_failure_returns_fallback_signal(mac_helpers):

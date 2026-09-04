@@ -11,6 +11,74 @@ def render_message(message: MessageSnapshot) -> str:
     return json.dumps(message.content_json, ensure_ascii=False, separators=(",", ":"))
 
 
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _summarize_arguments(arguments: object) -> str:
+    """Collapse a tool-call argument object into a short, safe description."""
+    if isinstance(arguments, str):
+        return _truncate(arguments, 200)
+    if isinstance(arguments, dict):
+        summary = ", ".join(f"{key}={_truncate(str(value), 60)}" for key, value in arguments.items())
+        return _truncate(summary, 300)
+    return _truncate(str(arguments), 200)
+
+
+def sanitize_transcript(messages: Sequence[MessageSnapshot]) -> str:
+    """Render messages into a safe, digestible source for the summarizer.
+
+    The raw per-message JSON must not be handed to the (sometimes weak) summarizer
+    model: it contains first-person assistant prose, tool-call wire structures and
+    literal ``<...>`` protocol tags, all of which invite role confusion (the model
+    "continues the task" and regurgitates fake ``<tool_call>`` blocks instead of
+    compressing). We therefore rebuild the transcript as role-labelled plain text,
+    skip reasoning blocks, replace tool calls with placeholders and neutralize any
+    remaining angle brackets so the compressor cannot echo live protocol tags.
+    """
+    lines: list[str] = []
+    for message in messages:
+        data = message.content_json.get("data") or message.content_json
+        role = {"user": "用户", "assistant": "助手", "tool": "工具", "system": "系统"}.get(
+            message.type, message.type
+        )
+        content = data.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                lines.append(f"[{role}] {content.strip()}")
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    parts.append(str(block.get("text", "")))
+                elif block_type in ("tool_use", "tool_call"):
+                    name = block.get("name") or block.get("tool_name") or "tool"
+                    args = block.get("input", block.get("arguments", {}))
+                    parts.append(f"[调用工具 {name}({_summarize_arguments(args)})]")
+                # thinking / reasoning / redacted_thinking are deliberately dropped.
+            body = "\n".join(part for part in parts if part).strip()
+            if body:
+                lines.append(f"[{role}] {body}")
+        if content is None or isinstance(content, str):
+            tool_calls = data.get("tool_calls")
+            if tool_calls and isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    name = call.get("name") or call.get("tool_name") or "tool"
+                    args = call.get("args", call.get("arguments", {}))
+                    lines.append(f"[{role}] [调用工具 {name}({_summarize_arguments(args)})]")
+    rendered = "\n".join(lines)
+    # Neutralize any literal markup that survived, in order of & first.
+    return rendered.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+
 def message_tokens(message: MessageSnapshot) -> int:
     return estimate_tokens(message.content_json)
 

@@ -120,10 +120,11 @@ def test_projection_is_checkpointed_and_model_output_is_canonical(database, tmp_
     assert result["messages"][-1].content == "ok"
     checkpoint_messages = agent.get_state(config).values["messages"]
     assert [message.id for message in checkpoint_messages] == [
-        "human-1",
         "work-state-1",
+        "human-1",
         "assistant-1",
     ]
+    assert checkpoint_messages[0].type == "system"  # 工作状态作为系统侧背景，置于用户提问之前
     with database.session() as session:
         rows = AgentRepository(session).active_messages("t1")
         assert [row.langchain_message_id for row in rows] == ["human-1", "assistant-1"]

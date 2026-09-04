@@ -13,6 +13,10 @@ _NOTIFICATION_SCRIPT = """on run argv
     display notification (item 1 of argv) with title "Coding Agent"
 end run"""
 
+_NOTIFICATION_SCRIPT_WITH_SOUND = """on run argv
+    display notification (item 1 of argv) with title "Coding Agent" sound name (item 2 of argv)
+end run"""
+
 
 class DesktopService:
     """Best-effort macOS helpers; never change persistent power/notification settings."""
@@ -67,10 +71,17 @@ class DesktopService:
         executable = shutil.which("osascript") if sys.platform == "darwin" else None
         if executable is None:
             return False
+        # 声音名作为独立参数传给 AppleScript（item 2 of argv），不参与字符串拼接，
+        # 与 message 一样不受注入影响。空串则退回无声音脚本。
+        sound = (self.settings.notification_sound or "").strip()
+        script = _NOTIFICATION_SCRIPT_WITH_SOUND if sound else _NOTIFICATION_SCRIPT
+        arguments = [executable, "-e", script, message]
+        if sound:
+            arguments.append(sound)
         try:
             # User text is an argument, never interpolated into AppleScript or a shell.
             subprocess.run(
-                [executable, "-e", _NOTIFICATION_SCRIPT, message],
+                arguments,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

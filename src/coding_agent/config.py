@@ -106,11 +106,16 @@ class TUISettings:
     prevent_sleep: bool = True
     usage_recent_messages: int = 20
     system_command_timeout_seconds: int = 3
+    # macOS `display notification` 默认不发声；填系统声音名（如 "Glass"）即带提示音，
+    # 置空字符串可退回纯横幅。非 macOS 上本字段无效果。
+    notification_sound: str = "Glass"
 
     def __post_init__(self) -> None:
         for name in ("notifications_enabled", "prevent_sleep"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"tui.{name} must be a boolean")
+        if not isinstance(self.notification_sound, str):
+            raise TypeError("tui.notification_sound must be a string")
         for name in ("usage_recent_messages", "system_command_timeout_seconds"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -168,6 +173,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         tui_values[name] = _environment_bool(environment, default)
     if "AGENT_USAGE_RECENT_MESSAGES" in os.environ:
         tui_values["usage_recent_messages"] = int(os.environ["AGENT_USAGE_RECENT_MESSAGES"])
+    if "AGENT_NOTIFICATION_SOUND" in os.environ:
+        tui_values["notification_sound"] = os.environ["AGENT_NOTIFICATION_SOUND"]
     agent_values = dict(agent_raw)
     for field_name, environment_name in (
         ("bash_enabled", "AGENT_BASH_ENABLED"),
