@@ -19,6 +19,7 @@ class ContextSettings:
     summary_max_attempts: int = 3
     recent_tool_interactions: int = 10
     tool_result_inline_tokens: int = 5_000
+    reasoning_retain_ratio: float = 0.15
 
     def __post_init__(self) -> None:
         ratios = {
@@ -40,6 +41,8 @@ class ContextSettings:
             raise ValueError("summary_max_attempts must be positive")
         if self.recent_tool_interactions < 0:
             raise ValueError("recent_tool_interactions must be non-negative")
+        if not 0 < self.reasoning_retain_ratio < 1:
+            raise ValueError("reasoning_retain_ratio must be between 0 and 1")
 
     @property
     def compression_limit(self) -> int:
@@ -48,6 +51,10 @@ class ContextSettings:
     @property
     def working_trigger(self) -> int:
         return int(self.total_tokens * self.working_trigger_ratio)
+
+    @property
+    def reasoning_budget(self) -> int:
+        return int(self.working_trigger * self.reasoning_retain_ratio)
 
 
 @dataclass(frozen=True)

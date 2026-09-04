@@ -124,6 +124,78 @@ class ContextEngine:
             return CompactionResult(created, merges)
 
     @staticmethod
+    def _strip_reasoning(message: MessageSnapshot) -> MessageSnapshot | None:
+        """Rebuild ``message`` without its chain-of-thought blocks, or None if it has none.
+
+        Only reasoning blocks are touched, so ``tool_use`` blocks and their
+        ``tool_result`` partners survive byte-for-byte by construction. A single plain
+        marker replaces the first removed block so the model can tell that reasoning was
+        withheld rather than never happening -- absence that looks like absence is the
+        failure mode that lets a rejected idea come back as a fresh one.
+        """
+
+        trailer = "[较早的模型思维链已剪裁，不再回读。]"
+        data = message.content_json.get("data")
+        if not isinstance(data, dict):
+            return None
+        content = data.get("content")
+        if not isinstance(content, list):
+            return None
+        reasoning = ("thinking", "reasoning", "redacted_thinking")
+        rebuilt = []
+        removed = False
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in reasoning:
+                removed = True
+                already = any(
+                    isinstance(b, dict) and b.get("type") == "text" and b.get("text") == trailer
+                    for b in rebuilt
+                )
+                if not already:
+                    rebuilt.append({"type": "text", "text": trailer})
+                continue
+            rebuilt.append(block)
+        if not removed:
+            return None
+        return replace(message, content_json={**message.content_json, "data": {**data, "content": rebuilt}})
+
+    @classmethod
+    def _retain_reasoning_within_budget(
+        cls, messages: list[MessageSnapshot], budget: int
+    ) -> list[MessageSnapshot]:
+        """Drop the coldest chain-of-thought first, newest-first, until ``budget`` tokens remain.
+
+        The saving of each message is measured with the very estimator the trigger uses, on
+        the projected result, so a message that costs nothing to trim is never charged for
+        it. The newest reasoning segment is kept even when it alone exceeds ``budget``: a
+        turn must never lose the thought that produced the call it is about to make.
+        """
+
+        stripped = [cls._strip_reasoning(message) for message in messages]
+        savings = [
+            0
+            if trimmed is None
+            else max(0, message_tokens(source) - message_tokens(trimmed))
+            for source, trimmed in zip(messages, stripped, strict=True)
+        ]
+        spend = 0
+        boundary = len(messages)
+        newest = -1
+        for index in range(len(messages) - 1, -1, -1):
+            if stripped[index] is None:
+                continue
+            newest = index
+            if spend + savings[index] > budget:
+                break
+            spend += savings[index]
+            boundary = index
+        boundary = min(boundary, newest)
+        return [
+            message if trimmed is None or index >= boundary else trimmed
+            for index, (message, trimmed) in enumerate(zip(messages, stripped, strict=True))
+        ]
+
+    @staticmethod
     def _trim_old_tool_results(messages: list[MessageSnapshot], keep: int) -> list[MessageSnapshot]:
         tool_positions = [index for index, message in enumerate(messages) if message.type == "tool"]
         old_positions = set(tool_positions[:-keep]) if keep > 0 else set(tool_positions)
@@ -147,6 +219,17 @@ class ContextEngine:
 
     def _create_l0_if_needed(self, state: ThreadContextState) -> int:
         working = state.working_messages
+        working_tokens = sum(message_tokens(message) for message in working)
+        if working_tokens <= self.settings.working_trigger:
+            return 0
+
+        # At the wall, shed cold chain-of-thought before reaching for the summarizer: it is
+        # the only reduction available here that costs no API call and destroys no memory
+        # block. Running it only at the wall -- rather than every turn -- is what keeps the
+        # cached prefix alive, because cache cost is set by how early a change sits in the
+        # prompt, not by how large the change is. See ContextSettings.reasoning_budget.
+        working = self._retain_reasoning_within_budget(working, self.settings.reasoning_budget)
+        state.working_messages = working
         working_tokens = sum(message_tokens(message) for message in working)
         if working_tokens <= self.settings.working_trigger:
             return 0

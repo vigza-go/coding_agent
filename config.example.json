@@ -42,6 +42,7 @@
     "summary_target_ratio": 0.5,
     "summary_max_attempts": 3,
     "recent_tool_interactions": 10,
-    "tool_result_inline_tokens": 5000
+    "tool_result_inline_tokens": 5000,
+    "reasoning_retain_ratio": 0.15
   }
 }
