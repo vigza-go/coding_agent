@@ -124,7 +124,7 @@ TUI 命令：
 
 文件写操作（`write_file` / `edit_file` / `delete`）执行前，把原始字节存入按 SHA-256 去重的 blob 表，并记录一条 `pending` 的 mutation；工具成功后补 `after_hash` 与 `succeeded`，失败记 `failed`。
 
-`rollback(thread_id, N)` 的语义是**撤销 `user_seq >= N`**，固定 8 步：
+`rollback(thread_id, N)` 的语义是**撤销 `user_seq >= N`**，固定 7 步：
 
 ```
 ① file_mutations 按全局 id 倒序恢复（只有成功的才恢复；崩溃遗留的 pending 保守还原）
@@ -133,8 +133,7 @@ TUI 命令：
 ④ 与「被撤销的消息 id 集合」相交的 memory block → active = 0
 ⑤ active_head_seq = min(active_head_seq, N-1)，next_user_seq 不回退
 ⑥ 从所有 active block 重新执行贪心覆盖，缺口回退到原始消息
-⑦ RemoveMessage(REMOVE_ALL_MESSAGES) + 重建结果，替换 LangGraph checkpoint 消息
-⑧ 恢复最近一个有效 work state
+⑦ 恢复最近一个有效 work state
 ```
 
 几个容易做错的地方：
@@ -143,7 +142,7 @@ TUI 命令：
 - **②③ 用软删除而不是物理删除**。因为 `memory_blocks.begin/end_message_id` 是指向消息主键的外键，物理删除会让引用悬空；同时撤销本身需要可再撤销，而成本统计也不该因为撤销而"退款"。
 - **`next_user_seq` 不回退**。历史只是被标记失效、仍在库里。若轮次号复用，新一轮会与已撤销那轮共用编号，那么按编号停用、按编号查文件变更、按编号算成本，全都分不清新旧。
 - **撤销不检查当前文件 hash**。用户手改过文件也直接还原成快照，这是产品定义而非 bug：撤销的语义是"回到那轮之前的状态"，不是"安全地合并"。
-- 恢复逐条幂等提交。若进程恰好在数据库提交后、checkpoint 更新前崩溃，启动时可从 canonical rows 再重建一次。
+- 恢复逐条幂等提交。不配置 checkpointer，所以数据库提交就是这一步的全部副作用，不存在"提交后、快照更新前"的中间态。
 
 ### 4. 会话协议自洽（Agent 长跑最容易崩的地方）
 
@@ -205,7 +204,7 @@ TUI 命令：
 - **压缩**：L0 生成与同级合并、贪心覆盖优先最长有效块、token 均衡切分保序、摘要失败不改缓存、记忆区间与工具配对跨越压缩与重载后仍成立
 - **工具窗口**：正常投影不得滚动窗口、只替换内容不删消息、以小历史收尾、下一次压缩剪裁新变旧的结果
 - **并发**：同文件锁覆盖快照到 finish、失败后释放锁、不同文件保持并行并共享 blob、并发 blob 插入复用同一行且不破坏 session
-- **协议**：不完整工具批次被补齐且迟到结果幂等、额度注入的消息在下一轮模型调用前落库、投影被 checkpoint 且模型输出为 canonical
+- **协议**：不完整工具批次被补齐且迟到结果幂等、额度注入的消息在下一轮模型调用前落库、送进模型的就是业务库投影且模型输出为 canonical
 - **Bash**：输出上限与超时杀进程组、turn 级中断、工作目录与 bash 语义、非零退出转 error 消息
 - **成本统计**：token 加权、不重复计 cache_read、缺失字段不当作 0 命中、0 命中是真 0
 

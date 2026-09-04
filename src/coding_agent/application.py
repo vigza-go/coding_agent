@@ -7,11 +7,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
-from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langchain_core.messages import AIMessage, HumanMessage
 
 from .config import Settings
-from .context.cover import ContextPiece
 from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
 from .integrations.langchain_agent import build_model, build_summary_model, create_langchain_agent
@@ -22,7 +20,6 @@ from .persistence.message_codec import decode_message, encode_message
 from .persistence.models import MessageType
 from .persistence.repository import AgentRepository
 from .services.bash_execution import BashExecutionService
-from .services.context_projection import ContextProjectionService
 from .services.message_persistence import MessagePersistenceService
 from .services.progress import ProgressCallbackHandler, TurnEvent
 from .services.rollback import RollbackPreview, RollbackResult, RollbackService
@@ -133,7 +130,7 @@ class AgentApplication:
             config["callbacks"] = [ProgressCallbackHandler(on_event)]
         try:
             response = self.agent.invoke(
-                {"messages": [human], "current_user_seq": user_seq},
+                {"messages": [human]},
                 config=config,
                 context=RunContext(thread_id, user_seq),
             )
@@ -187,18 +184,9 @@ class AgentApplication:
         return closed, tuple(errors)
 
     def rollback(self, thread_id: str, user_seq: int) -> RollbackResult:
-        def repair(pieces: list[ContextPiece], work_state: dict | None) -> None:
-            replacement = [
-                RemoveMessage(id=REMOVE_ALL_MESSAGES),
-                *ContextProjectionService.render_pieces(pieces),
-            ]
-            values: dict[str, Any] = {
-                "messages": replacement,
-                "work_state": work_state or {},
-            }
-            self.agent.update_state(self.config(thread_id), values)
-
-        return self.rollback_service.rollback(thread_id, user_seq, update_checkpoint=repair)
+        # 不再回写 LangGraph checkpoint：应用库才是唯一真相源，每轮模型调用前
+        # before_model 都会用投影结果整体覆盖 messages 通道（见 AgentRuntimeMiddleware）。
+        return self.rollback_service.rollback(thread_id, user_seq)
 
     def rollback_preview(self, thread_id: str, user_seq: int) -> RollbackPreview:
         return self.rollback_service.preview(thread_id, user_seq)

@@ -154,7 +154,6 @@ class SummaryLLMSettings:
 @dataclass(frozen=True)
 class Settings:
     database_url: str = "mysql+pymysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
-    checkpoint_database_url: str = "mysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
     artifact_dir: Path = field(default_factory=lambda: Path.cwd() / ".artifacts")
     llm: LLMSettings = field(default_factory=LLMSettings)
@@ -269,10 +268,6 @@ def load_settings(path: str | Path | None = None) -> Settings:
     )
     return Settings(
         database_url=os.getenv("DATABASE_URL", raw.get("database_url", Settings.database_url)),
-        checkpoint_database_url=os.getenv(
-            "CHECKPOINT_DATABASE_URL",
-            raw.get("checkpoint_database_url", Settings.checkpoint_database_url),
-        ),
         workspace_root=workspace,
         artifact_dir=artifact_dir,
         llm=llm,

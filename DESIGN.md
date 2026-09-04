@@ -82,9 +82,9 @@ SQLAlchemy ORM 对象。正常运行时，用户、模型、工具消息以及 w
 缓存只在追加消息、更新 work state、压缩和失效等短操作期间按 thread 加锁，不锁住完整 turn，
 以允许 LangGraph 并行执行同一批工具。并行工具消息按数据库全局 id 有序插入并去重。当前 TUI
 要求 rollback 只能在 turn 结束后触发；rollback 提交数据库变更后，必须丢弃对应缓存并从 active
-rows 重建。进程崩溃或缓存更新失败时也直接丢弃缓存，下次访问从数据库恢复；LangGraph
-checkpoint 不作为该缓存的数据来源。多进程部署仍需同一 thread 固定路由，或增加分布式缓存
-失效通知。
+rows 重建。进程崩溃或缓存更新失败时也直接丢弃缓存，下次访问从数据库恢复；应用不配置 LangGraph
+checkpointer，所以该缓存没有第二份持久化副本，也不需要与任何派生快照对齐。多进程部署仍需同一
+thread 固定路由，或增加分布式缓存失效通知。
 
 项目只注册一个 AgentRuntimeMiddleware，并由它显式编排上下文投影、调用额度、工具执行、文件
 mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware 仍单独保留用于注册和执行
@@ -161,11 +161,12 @@ TUI 的桌面辅助行为通过 `tui` 配置控制：macOS 仅在 `run_turn` 期
 5. 从剩余 active 消息重新计算最大 `user_seq` 作为 `active_head_seq`，空历史为 0；
    `next_user_seq` 不回退。
 6. 从所有 active memory block 中执行最长左块贪心覆盖，缺口回退到原始消息。
-7. 用 `RemoveMessage(REMOVE_ALL_MESSAGES)` 加重建结果替换 LangGraph checkpoint 消息。
-8. 恢复最近的有效 work state。
+7. 恢复最近的有效 work state。
 
-应用数据库是 canonical source。文件恢复逐条幂等提交；LangGraph checkpoint 是派生状态，若进程
-恰好在数据库提交后、checkpoint 更新前崩溃，启动时可从 canonical rows 再次重建。
+应用数据库是 canonical source，文件恢复逐条幂等提交。应用不配置 LangGraph checkpointer：
+每次模型调用前 `AgentRuntimeMiddleware.before_model` 都会用业务库投影整体覆盖 `messages` 通道，
+checkpoint 里的快照既不进入 prompt 也没有读者，却会按「每个图步骤一份全量 messages 快照」无界
+增长，并把 `get_tuple` 拖成秒级（详见 RUNBOOK 的排障条目）。因此撤销只改数据库，无派生快照需要对齐。
 
 ## 文件 mutation
 

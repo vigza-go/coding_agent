@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import distinct, func, select, update
@@ -83,8 +82,6 @@ class RollbackService:
         self,
         thread_id: str,
         user_seq: int,
-        *,
-        update_checkpoint: Callable[[list[ContextPiece], dict | None], None] | None = None,
     ) -> RollbackResult:
         if user_seq < 1:
             raise ValueError("user_seq must be >= 1")
@@ -140,8 +137,5 @@ class RollbackService:
         latest_state = self.context_engine.current_work_state(thread_id)
         work_state = latest_state.state_json if latest_state else None
 
-        # The application DB is canonical. A crash before this repair is handled by rebuilding
-        # the checkpoint from the canonical rows on the next startup.
-        if update_checkpoint is not None:
-            update_checkpoint(pieces, work_state)
+        # 应用数据库是 canonical source，文件恢复逐条幂等提交；不存在需要回写的派生快照。
         return RollbackResult(restored, deactivated or 0, tuple(pieces), work_state)

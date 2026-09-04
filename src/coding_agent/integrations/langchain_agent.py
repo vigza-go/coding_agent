@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, NotRequired
+from typing import Any
 
 from deepagents import FilesystemMiddleware
 from deepagents.backends import FilesystemBackend
-from langchain.agents import AgentState, create_agent
+from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.tools import tool
@@ -15,7 +15,6 @@ from langgraph.config import get_config
 from ..config import Settings
 from ..context.engine import ContextEngine
 from ..context.work_state import WorkStateError
-from ..persistence.checkpoint_connection import open_checkpointer
 from ..persistence.database import Database
 from ..services.bash_execution import BashExecutionService
 from ..services.call_limits import CallLimitService
@@ -27,11 +26,6 @@ from ..workspace.file_undo import FileMutationRecorder
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
 from .search import SearchClient
-
-
-class RuntimeState(AgentState):
-    current_user_seq: NotRequired[int]
-    work_state: NotRequired[dict[str, Any]]
 
 
 def build_model(settings: Settings) -> ChatAnthropic:
@@ -169,18 +163,21 @@ def create_langchain_agent(
             raise RuntimeError("search is enabled but no SearchClient was provided")
         tools.append(make_search_tool(search_client))
 
-    with open_checkpointer(settings.checkpoint_database_url) as checkpointer:
-        checkpointer.setup()
-        middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]
-        yield create_agent(
-            model=model,
-            tools=tools,
-            middleware=middleware,
-            context_schema=RunContext,
-            checkpointer=checkpointer,
-            system_prompt=(
-                "你是编码代理。合理使用文件与工作状态工具，保持回答简洁。"
-                "所有文件工具路径使用以 / 开头、相对于工作区根目录的虚拟路径。"
-                f"{bash_prompt}"
-            ),
-        )
+    # 不配置 checkpointer：应用库的 messages 表才是唯一真相源。AgentRuntimeMiddleware.before_model
+    # 在每次模型调用前用业务库投影整体覆盖 messages 通道，所以 checkpoint 里的快照既不进 prompt、
+    # 也没人读，却会按「每个图步骤一份全量 messages 快照」无界增长（实测把单线程推到 4.27GB，
+    # 而读一次要 10s）。跨步骤状态由 Pregel 在进程内持有，一轮之内的执行不依赖持久化。
+    # 需要 LangGraph 原生 interrupt() 式人工审批时再开回来，届时应选 Shallow/SQLite 这类
+    # 「每线程只留最新」的 saver，别再按图步骤写全量快照。
+    middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]
+    yield create_agent(
+        model=model,
+        tools=tools,
+        middleware=middleware,
+        context_schema=RunContext,
+        system_prompt=(
+            "你是编码代理。合理使用文件与工作状态工具，保持回答简洁。"
+            "所有文件工具路径使用以 / 开头、相对于工作区根目录的虚拟路径。"
+            f"{bash_prompt}"
+        ),
+    )

@@ -4,14 +4,16 @@
 
 1. 安装依赖：`uv sync --extra dev`
 2. 复制 `config.example.json` 为本地 `config.json`，或使用 `.env.example` 中的环境变量。
-3. 确保两个 MySQL URI 指向已存在的数据库：
-   - `DATABASE_URL` 使用 SQLAlchemy 格式 `mysql+pymysql://...`
-   - `CHECKPOINT_DATABASE_URL` 使用 PyMySQLSaver 格式 `mysql://...`
+3. 确保 MySQL 数据库存在，`DATABASE_URL` 使用 SQLAlchemy 格式 `mysql+pymysql://...`。
+   只有一个数据库连接需要配置：应用不启用 LangGraph checkpointer，原因见 DESIGN.md「撤销」
+   一节与下方排障条目。
 4. API key 建议只放在 `LLM_API_KEY` 环境变量。`config.json` 已被 Git 忽略。
 
-首次启动会通过 SQLAlchemy `create_all` 创建六张业务表，并通过 PyMySQLSaver `setup` 创建
-LangGraph checkpoint 表。已有数据库启动时会执行幂等兼容迁移；旧版本的
+首次启动会通过 SQLAlchemy `create_all` 创建六张业务表。已有数据库启动时会执行幂等兼容迁移；旧版本的
 `memory_blocks.is_frontier` 字段及其索引会被删除，当前块集合改由 greedy cover 动态计算。
+
+历史上启用过 PyMySQLSaver 的库会留下 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes`
+三张表。它们不再被读写，可以整库备份后直接 `DROP`（或留着当归档），不影响运行。
 
 ## 启动
 
@@ -109,6 +111,32 @@ ToolMessage；即使选择不 undo，下一轮也不会因孤立 tool call 被�
 
 已撤销历史仍计入（撤销不会退还用量）。当前仅覆盖已落库的主模型响应，不包含摘要请求、
 没有用量记录的失败请求和 SDK 内部重试，因此不是完整计费账单。
+
+## 排障：`/undo` 或每轮开头静等数秒
+
+现象是点确认撤销后静止 10 秒上下，普通对话则是首 token 特别慢（容易被误判成模型慢）。两者走的是
+同一个调用：`langgraph-checkpoint-mysql` 的 `PyMySQLSaver.get_tuple`。它的 `SELECT_SQL` 用
+`json_table` 展开 `checkpoint.channel_versions` 再去 join `checkpoint_blobs`，MySQL 优化器不会把
+相关条件下推，于是先用主键前缀 `(thread_id, checkpoint_ns_hash)` 捞出该线程**全部** blob 再逐行
+比对版本——线程历史越长读得越多，成本随历史线性增长；`innodb_buffer_pool_size` 还是默认 128MB 时
+基本等于冷读磁盘。注意 `PregelLoop.__enter__` 取"线程最新 checkpoint"也走同一条查询，所以症状
+不只出现在撤销上。
+
+确认（只读，不写业务数据）。`langgraph-checkpoint-mysql` 已随本条目一起从项目依赖退役，
+所以这两个探针要临时把它带回来：
+
+```text
+CKPT="langgraph-checkpoint-mysql[pymysql]>=3.0"
+PYTHONPATH=src:. uv run --with "$CKPT" python experiments/undo_latency_profile.py <thread> <back>  # 分段计时，看 P6 占比
+PYTHONPATH=src:. uv run --with "$CKPT" python experiments/checkpoint_read_probe.py <thread>         # 真实 SQL 的 EXPLAIN ANALYZE
+```
+
+现在的应用不配置 checkpointer，因此不再产生也不读取这些表；已存在的历史数据是纯归档，确认后
+可 `DROP`。若将来因为审批（`interrupt()`）需要重新启用，得先把这个依赖加回 `pyproject.toml`，
+并且必须换成「每线程只留最新一份」的 `ShallowMySQLSaver`，或按
+`experiments/checkpoint_rewrite_patch_probe.py` 里实测过 680x 的写法覆写 `_select_sql` 改成逐通道
+主键点查——照原样挂回默认 saver 就是把这 10 秒装回来；同时把 `innodb_buffer_pool_size` 提到可用
+内存的 50-70%。
 
 ## 验证
 

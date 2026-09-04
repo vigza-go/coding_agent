@@ -1,6 +1,5 @@
 {
   "database_url": "mysql+pymysql://root:password@127.0.0.1:3306/langchain?charset=utf8mb4",
-  "checkpoint_database_url": "mysql://root:password@127.0.0.1:3306/langchain?charset=utf8mb4",
   "workspace_root": ".",
   "llm": {
     "base_url": "https://api.deepseek.com/anthropic",
