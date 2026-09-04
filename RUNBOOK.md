@@ -12,8 +12,25 @@
 首次启动会通过 SQLAlchemy `create_all` 创建六张业务表。已有数据库启动时会执行幂等兼容迁移；旧版本的
 `memory_blocks.is_frontier` 字段及其索引会被删除，当前块集合改由 greedy cover 动态计算。
 
-历史上启用过 PyMySQLSaver 的库会留下 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes`
-三张表。它们不再被读写，可以整库备份后直接 `DROP`（或留着当归档），不影响运行。
+历史上启用过 PyMySQLSaver 的库会留下 `checkpoints` / `checkpoint_blobs` / `checkpoint_writes` /
+`checkpoint_migrations` 四张表（实测单库 9.8GB，占整库 99.6%），它们不再被读写，但存量不会自愈。
+收尾三步，顺序不能换：
+
+```text
+# 1) 体检 + 导出：找出「只在 checkpoint 里、业务库没有」的消息，落成 JSON
+PYTHONPATH=src:. uv run python experiments/retire_checkpoint_tables.py --export
+
+# 2) 退出所有 coding-agent 进程 —— 改动前启动的进程里还挂着 checkpointer，
+#    表一删，它们的下一轮就会报 Table ... doesn't exist
+
+# 3) DROP
+PYTHONPATH=src:. uv run python experiments/retire_checkpoint_tables.py --drop --yes
+```
+
+`--drop` 自带守卫：还有活的 `coding-agent` 进程、或有未导出的 checkpoint-only 内容时直接拒绝。
+之所以要先导出：业务库 `messages` 是 canonical source，正式线程的快照实测全是冗余（差集只剩
+`memory-*` / `work-state-*` 这类每轮现搭的投影脚手架，脚本会忽略），但早期试跑线程可能只有
+checkpoint 里留了记录。`innodb_file_per_table=ON` 时 DROP 才真的把空间还给操作系统。
 
 ## 启动
 
@@ -43,7 +60,8 @@ TUI 命令：
 
 - `/history [N]`：查看最近 N 条有效 canonical 消息；`/list` 是兼容别名。
 - `/threads`：查看最近会话。
-- `/thread ID`：切换 thread。
+- `/thread ID`：切换 thread。目标正被另一个会话跑 turn 时**拒绝切换**，
+  以免两边的历史搅在一起。
 - `/status`：查看当前 head、记忆块层级时间线、压缩区/工作区 token 占用和 work state。
 - `/usage [N]`：查看当前会话最近 N 条模型回复的 API 用量和加权缓存命中率，默认 20。
 - `/undo [N]`：预览并确认后撤销 `user_seq >= N`；省略 N 时撤销当前 head。
@@ -131,12 +149,32 @@ PYTHONPATH=src:. uv run --with "$CKPT" python experiments/undo_latency_profile.p
 PYTHONPATH=src:. uv run --with "$CKPT" python experiments/checkpoint_read_probe.py <thread>         # 真实 SQL 的 EXPLAIN ANALYZE
 ```
 
-现在的应用不配置 checkpointer，因此不再产生也不读取这些表；已存在的历史数据是纯归档，确认后
-可 `DROP`。若将来因为审批（`interrupt()`）需要重新启用，得先把这个依赖加回 `pyproject.toml`，
+现在的应用不配置 checkpointer，因此不再产生也不读取这些表；存量按「准备」一节里的
+`experiments/retire_checkpoint_tables.py` 三步清掉。若将来因为审批（`interrupt()`）需要重新启用，
+得先把这个依赖加回 `pyproject.toml`（`setup()` 会重建这几张表），
 并且必须换成「每线程只留最新一份」的 `ShallowMySQLSaver`，或按
 `experiments/checkpoint_rewrite_patch_probe.py` 里实测过 680x 的写法覆写 `_select_sql` 改成逐通道
 主键点查——照原样挂回默认 saver 就是把这 10 秒装回来；同时把 `innodb_buffer_pool_size` 提到可用
 内存的 50-70%。
+
+## 排障：提示「thread 正在被另一个会话使用」
+
+三种入口都会报这句，都是常态不是故障（一次都没写，历史没被污染）：启动时 `启动失败：thread 'x' 正被
+另一个会话使用`、切换时 `不切换。…`、以及极少见的 `本轮未开始：…`（只在你的会话空闲期间被别的进程接管
+时才出现）。占用是**会话级**的：只要另一个进程还停在这条 thread 里 —— 哪怕它一个字都没问 —— 你就进不
+去。让对方 `/exit`（或 Ctrl-C）即可；急着干活就用 `/thread <别的 id>` 换一条轨道。想知道是谁，
+`ps aux | grep coding-agent` 数一下在跑的进程就够了。故意没做强制接管：宁可显式退出，也不要两个会话
+同时写一条轨道。
+
+不需要手工清锁：锁是 MySQL 的**连接级**咨询锁，Ctrl-C、`kill -9`、断电、网络断开，服务端都会随会话
+把它收回，下一个会话立刻拿得到 —— 没有 TTL、没有 holder 列、没有要清的残留表。
+
+如果报的是 `占用已失效（连接被服务端结束，或已被别的会话抢走）` 或 `在本轮期间被别的会话推进或
+回滚`：本轮被安全终止，它之前已提交的轮次仍在库里（可 `/undo` 退回），重新发起即可。这类终止**刻意
+不自动重试** —— 空窗期里状态不可信，静默续写才是真正会搅乱历史的行为。
+
+同一棵工作树允许并行开多个会话（各自一条 thread），树级和路径级都不互斥；并发写同一文件靠
+`edit_file` 自然失败暴露冲突，而不是靠锁预防。需要真隔离用 Git worktree。
 
 ## 验证
 
@@ -149,6 +187,11 @@ uv run pytest -q
 `uv run pytest -q tests/integrations/test_file_concurrency.py`，还会验证 MySQL 并发插入和
 REPEATABLE READ 下的 blob 复用。该连接需有创建/删除数据库权限；测试仅使用自动生成的
 `coding_agent_test_<随机标识>` 临时库，结束后删除，不在 URI 指定的业务库中写测试数据。
+
+thread 占用锁的 MySQL 行为同理 gated：
+`TEST_MYSQL_ADMIN_URL=... uv run pytest -q tests/integrations/test_thread_lock_mysql.py`
+覆盖跨连接互斥、`KILL` 掉持锁连接后本轮终止、空窗期被别的会话推进时终止（该连接还需
+PROCESS/KILL 权限）。SQLite 没有跨会话咨询锁，所以单测只覆盖 seq 分歧检测与调用点。
 
 文件快照并发修复不需要数据库迁移。更新代码后需重启 TUI 才生效，旧会话可继续使用。
 同一应用内，针对同一路径的受控写工具串行执行，不同文件仍可并行；Bash 和外部进程不受

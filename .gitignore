@@ -6,4 +6,5 @@ __pycache__/
 .env
 config.json
 .artifacts/
+.DS_Store
 

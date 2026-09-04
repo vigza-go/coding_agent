@@ -27,6 +27,9 @@ class MessagePersistenceService:
     def persist_messages(
         self, *, thread_id: str, user_seq: int, messages: list[MessageT]
     ) -> list[MessageT]:
+        # 写时间轴前确认这轮仍然独占该 thread：锁丢了或 seq 对不上都必须终止，
+        # 否则会把基于过期上下文的回复混进别人的历史里。
+        self.database.turn_guard.verify(thread_id)
         normalized: list[MessageT] = []
         rows = []
         with self.database.session() as session:

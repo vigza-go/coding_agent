@@ -111,6 +111,28 @@ class AgentApplication:
         *,
         on_event: Callable[[TurnEvent], None] | None = None,
     ) -> AIMessage | None:
+        """跑一轮。thread 的占用是会话级的（进入时取得，退出才放），所以这里只是
+        幂等地确认一次：掉了就重取，已被别的会话接管就抛 :class:`ThreadBusyError`。
+        """
+
+        self.enter_thread(thread_id)
+        return self._run_turn_locked(thread_id, text, on_event=on_event)
+
+    def enter_thread(self, thread_id: str) -> None:
+        """占用一条 thread，直到 :meth:`leave_thread`；正被别人占着就抛错。"""
+
+        self.database.turn_guard.acquire(thread_id)
+
+    def leave_thread(self) -> None:
+        self.database.turn_guard.release()
+
+    def _run_turn_locked(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        on_event: Callable[[TurnEvent], None] | None = None,
+    ) -> AIMessage | None:
         with self.database.session() as session:
             repo = AgentRepository(session)
             user_seq = repo.reserve_user_seq(thread_id)
@@ -122,6 +144,8 @@ class AgentApplication:
                 content_json=encode_message(human),
                 langchain_message_id=human.id,
             )
+        # 记下本轮 user_seq，之后每次写时间轴都用它验证"没人插过这条 thread"。
+        self.database.turn_guard.bind(user_seq)
         self.context_engine.append_messages(thread_id, [row])
         if self.bash_executor is not None:
             self.bash_executor.prepare_turn()
@@ -266,11 +290,15 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         bash_executor=bash_executor,
         search_client=search_client,
     ) as agent:
-        yield AgentApplication(
-            settings,
-            database,
-            agent,
-            context_engine,
-            recorder,
-            bash_executor,
-        )
+        try:
+            yield AgentApplication(
+                settings,
+                database,
+                agent,
+                context_engine,
+                recorder,
+                bash_executor,
+            )
+        finally:
+            # 会话退出即放锁。进程被强杀时不用管：锁随连接被服务端收回。
+            database.turn_guard.release()

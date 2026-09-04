@@ -19,6 +19,7 @@ from rich.text import Text
 from ..application import AgentApplication, TurnExecutionError, create_application
 from ..config import load_settings
 from ..integrations.desktop import DesktopService
+from ..persistence.thread_lock import ThreadBusyError
 from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
 from .commands import CommandParseError, ParsedCommand, parse_command, positive_int
 from .rendering import TUI_THEME, ContentRenderer
@@ -26,7 +27,7 @@ from .rendering import TUI_THEME, ContentRenderer
 HELP = """可用命令：
   /history [N]   查看最近 N 条有效消息（默认 20）
   /threads       查看最近会话
-  /thread ID     切换会话
+  /thread ID     切换会话（别人正占着则拒绝）
   /status        查看当前会话状态
   /usage [N]     查询近期 N 条模型回复的 API 用量与缓存命中率
   /undo [SEQ]    预览并撤销 SEQ 及之后的历史
@@ -72,6 +73,8 @@ class TerminalUI:
             f"[bold]Coding Agent[/bold] · "
             f"thread=[cyan]{markup_escape(self.thread_id)}[/cyan]\n{HELP}"
         )
+        # 进入即占用：这条轨道里已经有别的会话（哪怕它正闲着不说话）就不启动。
+        self.app.enter_thread(self.thread_id)
         while True:
             try:
                 text = self.session.prompt(
@@ -101,6 +104,9 @@ class TerminalUI:
                 self._run_turn(text)
             except CommandParseError as error:
                 self._error(str(error))
+            except ThreadBusyError as error:
+                # 常态而非故障：另一会话正占着这条 thread，本轮一个字节都没写。
+                self._error(f"本轮未开始：{error}")
             except Exception as error:  # noqa: BLE001 - keep the interactive session alive
                 self._error(str(error))
                 if self.debug:
@@ -114,7 +120,13 @@ class TerminalUI:
             return True
         if command.name == "thread":
             assert command.argument is not None
-            self.thread_id = command.argument
+            target = command.argument
+            try:
+                self.app.enter_thread(target)
+            except ThreadBusyError as error:
+                self._error(f"不切换。{error}")
+                return True
+            self.thread_id = target
             self.console.print(f"已切换到 thread=[cyan]{markup_escape(self.thread_id)}[/cyan]")
             return True
         if command.name == "threads":
@@ -431,6 +443,10 @@ def run() -> int:
         with create_application(settings) as app:
             TerminalUI(app, console, thread_id=args.thread, debug=args.debug).run()
         return 0
+    except ThreadBusyError as error:
+        # 启动时抢不到占用是常态（别人停在那条 thread 里），不该刷 traceback。
+        console.print(Text(f"启动失败：{error}", style="bold red"))
+        return 1
     except KeyboardInterrupt:
         console.print("\n已退出。")
         return 130

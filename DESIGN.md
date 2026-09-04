@@ -22,6 +22,7 @@ repository；框架中间件也不进入 context、workspace 等核心模块。
 - `user_seq` 是 thread 内用户调用编号，从 1 开始，只增不减；撤销不会复用编号。
 - `conversations.active_head_seq` 是当前有效历史的最大用户轮次，空历史为 0。
 - `memory_blocks.active` 只表示块仍属于有效历史。
+- 同一条 thread 在同一时刻只有一个会话待在里面（含空着不说话的会话）；该占用挂在数据库连接上，连接消失即失效。
 - 当前压缩块集合不单独持久化：缓存首次加载或撤销后，从左端开始选择最长 active block，
   由 greedy cover 动态推导。父块生成后，父子都保持 active；父块因覆盖范围更长而自然
   取代子块进入当前上下文。
@@ -83,8 +84,41 @@ SQLAlchemy ORM 对象。正常运行时，用户、模型、工具消息以及 w
 以允许 LangGraph 并行执行同一批工具。并行工具消息按数据库全局 id 有序插入并去重。当前 TUI
 要求 rollback 只能在 turn 结束后触发；rollback 提交数据库变更后，必须丢弃对应缓存并从 active
 rows 重建。进程崩溃或缓存更新失败时也直接丢弃缓存，下次访问从数据库恢复；应用不配置 LangGraph
-checkpointer，所以该缓存没有第二份持久化副本，也不需要与任何派生快照对齐。多进程部署仍需同一
-thread 固定路由，或增加分布式缓存失效通知。
+checkpointer，所以该缓存没有第二份持久化副本，也不需要与任何派生快照对齐。多进程的**写冲突**
+由下一节的 turn 占用锁挡住；跨进程的缓存失效通知仍然没有，所以同一条 thread 还是建议固定一个
+会话，长空闲后靠写轴前的分歧检测兜住。
+
+## thread 占用（跨进程单写者）
+
+一条 thread 同一时刻只允许一个会话待在里面。锁不落在数据层：MySQL 连接级咨询锁
+`GET_LOCK('ca:t:'+sha1(thread_id)[:16], 3)` 挂在一条自己独占的 NullPool 连接上，锁寿命等于连接寿
+命，所以 Ctrl-C、`kill -9`、断电都由服务端随会话收回，新会话立刻接管 —— 没有 holder 列、没有 TTL、
+没有心跳线程，也不加表加字段。（必须单独建 NullPool engine：业务池的 `connect()` 退出只是还池、
+不断 TCP，锁会跟着池里的连接继续活着。）
+
+占用是**会话级**的，活过 turn：进入 thread（启动时的 `--thread`，或 `/thread <id>` 成功）时
+acquire 并一直持有，切走或退出才 release。所以一个开着终端不说话的会话也算占着这条轨道，别的会话
+进不来（`本轮未开始` 那种提示基本只在下面第四条的接管场景出现）。`run_turn` 只对占用做幂等续期。
+这条口径的代价是"别人得等你退出"，换来的是"不会有人跟你同时写一条轨道"，而且不需要 TTL、心跳、
+清理界面；也刻意没做 `/takeover` 强制接管——真被卡住就 `ps` 找到那个会话把它退出。不报占用者是谁，
+想知道是哪个进程 `ps` 一眼就够，为此多养一条查询和一堆透传字段不值。
+
+每次写时间轴前 `TurnGuard.verify` 做两件事：先在**原来那条持锁连接**上 `GET_LOCK(name, 0)` 复核
+（同连接重取立即返回 1，顺带重置 `wait_timeout` 的空闲计时），再比对
+`(active_head_seq, next_user_seq) == (user_seq, user_seq + 1)`。这个等式由本轮开头的
+`reserve_user_seq` 写下，本轮之内没有别的代码再动这两列，所以等式还成立就等于空窗期没有别的会话
+写入或回滚过。**本轮之内**连接报错不换新连接重取 —— 那等于静默接管，正是"锁丢了却还在写"的根源，
+直接抛 `TurnAbortedError` 终止本轮。跨会话的重取只发生在 `acquire`（每轮开头一次）：会话空闲太久时
+`wait_timeout` 会收走连接、锁随之消失而本机不知情，此时重取一次是合法的 —— 拿得回来说明没人动过，
+拿不回来就报 `ThreadBusyError`（真被接管了），而空窗期里若有人写过，紧随其后的 seq 比对仍然会拦住。
+
+刻意不做：不锁工作树、不锁路径 —— 同一棵树下并行发起多个会话是产品前提，树级互斥会把并行调研变成
+排队，冲突交给 `edit_file` 的自然失败和 `/undo` 承担；`/undo` 也不取这把锁、不做任何前置拦截。需
+要真隔离时用 Git worktree（见 readme）。
+
+SQLite 没有跨会话咨询锁，锁的部分直接不做（单进程不会自己跟自己抢），seq 检测照常生效。真实行为
+由 gated 的 `tests/integrations/test_thread_lock_mysql.py` 验证：跨连接互斥、持锁连接被 `KILL` 后
+本轮终止、空窗期被别的会话推进时终止。
 
 项目只注册一个 AgentRuntimeMiddleware，并由它显式编排上下文投影、调用额度、工具执行、文件
 mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware 仍单独保留用于注册和执行
@@ -171,8 +205,11 @@ checkpoint 里的快照既不进入 prompt 也没有读者，却会按「每个�
 ## 文件 mutation
 
 `write_file`、`edit_file`、`delete` 在执行前保存文件原始 bytes 到 SHA-256 去重 blob，记录 pending
-mutation；工具成功后写 after hash 和 succeeded，失败则记 failed。撤销不检查当前文件 hash，按
-产品定义直接恢复。崩溃遗留的 pending mutation 也保守恢复；恢复 before 状态是幂等的。
+mutation；工具成功后写 after hash 和 succeeded，失败则记 failed。撤销**刻意不比对**当前文件
+hash：撤销是用户显式触发的意图，即使文件已被别的会话或手工改动带偏也必须照做——拦下来只会让
+人在最需要退回去的时候退不回。因此这里不是漏检，而是"显式触发即视为授权覆盖"（thread 占用锁
+只保证同一条 thread 不同时写，同一棵工作树允许并行，见「thread 占用」一节）。崩溃遗留的
+pending mutation 也保守恢复；恢复 before 状态是幂等的。
 `bash` 造成的文件变化不在 V1 追踪范围内，目录删除在 V1 中拒绝执行。Bash 在宿主机直接运行，
 工作目录不是安全沙箱，也不能阻止命令访问 workspace 外路径；只应在可信的本地开发环境中显式
 启用。需要隔离和可撤销 Shell 时，应改用容器/VM、overlay 或 Git worktree 级执行后端。

@@ -143,3 +143,54 @@ def test_model_finished_without_prose_prints_nothing(monkeypatch):
     ui._render_event(Mock(), TurnEvent(TurnEventKind.MODEL_FINISHED))
 
     assert output.getvalue() == ""
+
+
+def test_thread_command_refuses_to_switch_into_occupied_thread(monkeypatch):
+    from coding_agent.persistence.thread_lock import ThreadBusyError
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.enter_thread.side_effect = ThreadBusyError("thread 'research' 正被另一个会话使用")
+
+    assert ui._handle_command(ParsedCommand(name="thread", argument="research")) is True
+
+    assert ui.thread_id == "t1"  # 没切过去
+    assert "不切换" in output.getvalue()
+
+
+def test_thread_command_switches_when_thread_is_free(monkeypatch):
+    ui, app, output, _ = make_ui(monkeypatch)
+
+    ui._handle_command(ParsedCommand(name="thread", argument="research"))
+
+    assert ui.thread_id == "research"
+    app.enter_thread.assert_called_once_with("research")
+    assert "已切换" in output.getvalue()
+
+
+def test_startup_refuses_to_run_inside_an_occupied_thread(monkeypatch):
+    from coding_agent.persistence.thread_lock import ThreadBusyError
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.enter_thread.side_effect = ThreadBusyError("thread 't1' 正被另一个会话使用")
+    ui.session = SimpleNamespace(prompt=Mock(side_effect=AssertionError("不该开始问")))
+
+    try:
+        ui.run()
+    except ThreadBusyError:
+        pass  # 由 ui.run() 外面那层收成"启动失败"
+    else:
+        raise AssertionError("占用失败应该冒出去")
+    assert "已切换" not in output.getvalue()
+
+
+def test_busy_thread_is_reported_without_traceback(monkeypatch):
+    from coding_agent.persistence.thread_lock import ThreadBusyError
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.run_turn.side_effect = ThreadBusyError("thread 't1' 正被另一个会话使用")
+    ui.session = SimpleNamespace(prompt=Mock(side_effect=["问一句", EOFError]))
+    ui.run()
+
+    printed = output.getvalue()
+    assert "本轮未开始" in printed
+    assert "Traceback" not in printed
