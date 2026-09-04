@@ -8,6 +8,11 @@
     "model": "deepseek-v4-flash[1M]",
     "max_output_tokens": 2000
   },
+  "summary_llm": {
+    "model": "qwen3.7-flash",
+    "max_output_tokens": 4000,
+    "thinking": "disabled"
+  },
   "tui": {
     "notifications_enabled": true,
     "prevent_sleep": true,

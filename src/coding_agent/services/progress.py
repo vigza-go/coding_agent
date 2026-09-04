@@ -17,6 +17,8 @@ class TurnEventKind(StrEnum):
     TOOL_STARTED = "tool_started"
     TOOL_FINISHED = "tool_finished"
     TOOL_FAILED = "tool_failed"
+    SUMMARY_STARTED = "summary_started"
+    SUMMARY_FINISHED = "summary_finished"
 
 
 @dataclass(frozen=True)
@@ -66,17 +68,36 @@ class TurnEventGate:
 
 
 class ProgressCallbackHandler(BaseCallbackHandler):
+    # 压缩调用带这个 tag；命中时上报 SUMMARY_* 而不是 MODEL_*。
+    SUMMARIZER_TAG = "summarizer"
+
     def __init__(self, emit: Callable[[TurnEvent], None]) -> None:
         self.emit = emit
         self._tool_names: dict[UUID, str] = {}
+        self._summary_levels: dict[UUID, int] = {}
         self._lock = Lock()
 
     def on_chat_model_start(self, serialized, messages, **kwargs):
-        del serialized, messages, kwargs
+        del serialized, messages
+        tags = set(kwargs.get("tags") or [])
+        if self.SUMMARIZER_TAG in tags:
+            metadata = kwargs.get("metadata") or {}
+            level = int(metadata.get("level", 0))
+            run_id = kwargs.get("run_id")
+            with self._lock:
+                if run_id is not None:
+                    self._summary_levels[run_id] = level
+            self.emit(TurnEvent(TurnEventKind.SUMMARY_STARTED, f"L{level}"))
+            return
         self.emit(TurnEvent(TurnEventKind.MODEL_STARTED))
 
     def on_llm_end(self, response, **kwargs):
-        del kwargs
+        run_id = kwargs.get("run_id")
+        with self._lock:
+            level = self._summary_levels.pop(run_id, None) if run_id is not None else None
+        if level is not None:
+            self.emit(TurnEvent(TurnEventKind.SUMMARY_FINISHED, f"L{level}"))
+            return
         self.emit(TurnEvent(TurnEventKind.MODEL_FINISHED, text=_mid_turn_text(response)))
 
     def on_tool_start(

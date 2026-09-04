@@ -123,12 +123,35 @@ class TUISettings:
 
 
 @dataclass(frozen=True)
+class SummaryLLMSettings:
+    """Dedicated model used for context compression/summarization.
+
+    Kept separate from the main agent LLM because compression should be fast, cheap
+    and deterministic: extended thinking only burns budget and delays the turn. Leave
+    ``model`` empty to reuse the main LLM; ``thinking`` is ``"disabled"`` by default.
+    """
+
+    model: str = ""
+    api_key: str = ""
+    base_url: str = ""
+    max_output_tokens: int = 0
+    thinking: str = "disabled"  # "disabled" | "auto"
+
+    def __post_init__(self) -> None:
+        if self.thinking not in ("disabled", "auto"):
+            raise ValueError("summary_llm.thinking must be 'disabled' or 'auto'")
+        if self.max_output_tokens < 0:
+            raise ValueError("summary_llm.max_output_tokens must be >= 0")
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str = "mysql+pymysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     checkpoint_database_url: str = "mysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
     artifact_dir: Path = field(default_factory=lambda: Path.cwd() / ".artifacts")
     llm: LLMSettings = field(default_factory=LLMSettings)
+    summary_llm: SummaryLLMSettings = field(default_factory=SummaryLLMSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     agent: AgentSettings = field(default_factory=AgentSettings)
     tui: TUISettings = field(default_factory=TUISettings)
@@ -222,6 +245,21 @@ def load_settings(path: str | Path | None = None) -> Settings:
         or agent_raw.get("search_api_key", "")
         or llm.api_key
     )
+    summary_raw = raw.get("summary_llm", {})
+    if not isinstance(summary_raw, dict):
+        raise TypeError("summary_llm must be an object")
+    summary_llm = SummaryLLMSettings(
+        model=os.getenv("SUMMARY_LLM_MODEL", summary_raw.get("model", "")),
+        api_key=os.getenv("SUMMARY_LLM_API_KEY", summary_raw.get("api_key", "")),
+        base_url=os.getenv("SUMMARY_LLM_BASE_URL", summary_raw.get("base_url", "")),
+        max_output_tokens=int(
+            os.getenv(
+                "SUMMARY_LLM_MAX_OUTPUT_TOKENS",
+                summary_raw.get("max_output_tokens", 0),
+            )
+        ),
+        thinking=os.getenv("SUMMARY_LLM_THINKING", summary_raw.get("thinking", "disabled")),
+    )
     return Settings(
         database_url=os.getenv("DATABASE_URL", raw.get("database_url", Settings.database_url)),
         checkpoint_database_url=os.getenv(
@@ -231,6 +269,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         workspace_root=workspace,
         artifact_dir=artifact_dir,
         llm=llm,
+        summary_llm=summary_llm,
         context=ContextSettings(**context_raw),
         agent=AgentSettings(**agent_values),
         tui=TUISettings(**tui_values),

@@ -45,6 +45,32 @@ def build_model(settings: Settings) -> ChatAnthropic:
     )
 
 
+def build_summary_model(settings: Settings) -> ChatAnthropic:
+    """A dedicated, cheap, deterministic model for context compression.
+
+    Summarization must not burn latency or tokens on extended thinking, so by default
+    ``thinking={"type": "disabled"}`` is requested for the summary model (use
+    ``summary_llm.thinking="auto"`` in config to keep the provider default instead).
+    Falls back to the main agent LLM when ``summary_llm.model`` is empty.
+    """
+    summary = settings.summary_llm
+    llm = settings.llm
+    api_key = summary.api_key or llm.api_key
+    if not api_key:
+        raise RuntimeError(
+            "summary LLM has no api_key; set summary_llm.api_key or LLM_API_KEY"
+        )
+    kwargs: dict[str, Any] = {
+        "model": summary.model or llm.model,
+        "api_key": api_key,
+        "base_url": summary.base_url or llm.base_url,
+        "max_tokens": summary.max_output_tokens or llm.max_output_tokens,  # type: ignore
+    }
+    if summary.thinking == "disabled":
+        kwargs["thinking"] = {"type": "disabled"}
+    return ChatAnthropic(**kwargs)  # type: ignore[call-arg]
+
+
 def make_work_state_tool(context_engine: ContextEngine):
     @tool("work_state", parse_docstring=True)
     def work_state(op: str, key: str = "", value: str = "") -> str:

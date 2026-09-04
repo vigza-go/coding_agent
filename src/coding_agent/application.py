@@ -14,7 +14,7 @@ from .config import Settings
 from .context.cover import ContextPiece
 from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
-from .integrations.langchain_agent import build_model, create_langchain_agent
+from .integrations.langchain_agent import build_model, build_summary_model, create_langchain_agent
 from .integrations.middleware import RunContext
 from .integrations.search import make_search_client
 from .persistence.database import Database
@@ -255,7 +255,8 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
     database = Database(settings.database_url)
     database.create_schema()
     model = build_model(settings)
-    context_engine = ContextEngine(database, settings.context, LangChainSummarizer(model))
+    summary_model = build_summary_model(settings)
+    context_engine = ContextEngine(database, settings.context, LangChainSummarizer(summary_model))
     recorder = FileMutationRecorder(database, settings.workspace_root)
     bash_executor = (
         BashExecutionService(

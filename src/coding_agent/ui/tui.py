@@ -248,6 +248,11 @@ class TerminalUI:
                 f"[red]✗[/red] {markup_escape(event.name or 'tool')} "
                 f"[dim]{markup_escape(event.detail or '')}[/dim]"
             )
+        elif event.kind == TurnEventKind.SUMMARY_STARTED:
+            status.update(f"[cyan]正在压缩记忆 {markup_escape(event.name or '')}…[/cyan]")
+        elif event.kind == TurnEventKind.SUMMARY_FINISHED:
+            status.update("[cyan]继续处理…[/cyan]")
+            self.console.print(f"[dim]✓ 记忆 {markup_escape(event.name or '')} 压缩完成[/dim]")
 
     def _show_history(self, limit: int) -> None:
         entries = self.app.active_history(self.thread_id, limit=limit)

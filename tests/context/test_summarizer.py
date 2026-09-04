@@ -58,6 +58,24 @@ def test_retrying_summarizer_raises_after_max_attempts():
         assert "tool_call" not in str(error).lower() or "invalid" in str(error)
 
 
+def test_retrying_summarizer_accepts_clean_output_over_hard_limit():
+    # A faithful-but-verbose summarizer overshoots the soft target on every attempt:
+    # we must accept the shortest clean digest instead of failing the whole turn.
+    calls: list[str] = []
+
+    class AlwaysOversize:
+        def summarize(self, text, *, hard_limit, level, attempt, feedback=""):
+            del text, level
+            calls.append(feedback)
+            return "要点：" + "细节内容非常丰富" * 8  # clean valid text, > hard_limit
+
+    retrying = RetryingSummarizer(AlwaysOversize(), max_attempts=3)
+    result = retrying.summarize("src", hard_limit=3, level=0)
+    assert result.startswith("要点：")
+    assert len(calls) == 3  # tried all attempts before degrading gracefully
+    assert "超出硬上限" in calls[-1]
+
+
 def test_first_summary_issue_detects_wire_fragments():
     assert first_summary_issue("<tool_call>\n{\"name\": \"read_file\"}") is not None
     assert first_summary_issue("提到了 </parameter> 这个词") is not None
@@ -115,9 +133,11 @@ def test_sanitize_transcript_removes_wire_and_thinking_content():
 class CapturingModel:
     def __init__(self) -> None:
         self.messages = []
+        self.config = None
 
-    def invoke(self, messages):
+    def invoke(self, messages, *, config=None):
         self.messages = messages
+        self.config = config
         return type("R", (), {"content": "摘要内容"})()
 
 
@@ -130,3 +150,14 @@ def test_langchain_summarizer_hardens_prompt_and_wraps_transcript():
     assert "不要使用第一人称" in system.content
     assert "禁止输出工具调用" in system.content
     assert human.content == "<transcript>\ntranscript body\n</transcript>"
+
+
+def test_langchain_summarizer_tags_invocation_with_level_for_progress():
+    from coding_agent.services.progress import ProgressCallbackHandler
+
+    model = CapturingModel()
+    summarizer = LangChainSummarizer(model)
+    summarizer.summarize("text", hard_limit=100, level=3, attempt=1)
+    tags = set(model.config.get("tags") or [])
+    assert ProgressCallbackHandler.SUMMARIZER_TAG in tags
+    assert model.config.get("metadata") == {"level": 3}

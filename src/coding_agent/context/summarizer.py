@@ -6,6 +6,7 @@ from typing import Protocol
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ..services.progress import ProgressCallbackHandler
 from .tokens import estimate_tokens
 
 # Wire/protocol-shaped leftovers that a summary must never contain. The compressor
@@ -73,9 +74,19 @@ class RetryingSummarizer:
         self.validate = validate
 
     def summarize(self, text: str, *, hard_limit: int, level: int, attempt: int = 1) -> str:
+        """Best-effort digest bounded by ``hard_limit``.
+
+        ``hard_limit`` is a soft target, not a hard contract: a compression summary
+        that slightly overshoots still shrinks memory, so after the retries we accept
+        the shortest content-clean output instead of failing the caller (which, in the
+        hot path, would take down the whole user turn). We only raise when every
+        attempt came back empty or with protocol-garbage content.
+        """
         del attempt
-        last_count = 0
+        best: str | None = None
+        best_count = 0
         reason = ""
+        last_count = 0
         for current_attempt in range(1, self.max_attempts + 1):
             kwargs: dict[str, object] = {
                 "text": text,
@@ -88,14 +99,18 @@ class RetryingSummarizer:
             output = self.delegate.summarize(**kwargs).strip()  # type: ignore[call-arg]
             last_count = estimate_tokens(output) if output else 0
             issue = None if not output else self.validate(output)
-            if output and last_count <= hard_limit and issue is None:
-                return output
-            if last_count > hard_limit:
+            if output and issue is None:
+                if last_count <= hard_limit:
+                    return output
+                if best is None or last_count < best_count:
+                    best, best_count = output, last_count
                 reason = f"超出硬上限（{last_count} > {hard_limit} tokens）"
             elif not output:
                 reason = "输出为空"
             else:
                 reason = issue or "输出未通过内容校验"
+        if best is not None:
+            return best
         raise SummaryError(
             f"summary still invalid after {self.max_attempts} attempts "
             f"(last reason: {reason}; last={last_count} tokens)"
@@ -143,7 +158,11 @@ class LangChainSummarizer:
             [
                 SystemMessage(content=system),
                 HumanMessage(content=f"<transcript>\n{text}\n</transcript>"),
-            ]
+            ],
+            config={
+                "tags": [ProgressCallbackHandler.SUMMARIZER_TAG],
+                "metadata": {"level": level},
+            },
         )
         content = response.content
         if isinstance(content, str):
