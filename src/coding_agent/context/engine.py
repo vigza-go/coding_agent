@@ -308,14 +308,7 @@ class ContextEngine:
             selected = state.selected_blocks
             if sum(block.token_count for block in selected) <= self.settings.compression_limit:
                 return merge_count
-            pair = next(
-                (
-                    (index, left, right)
-                    for index, (left, right) in enumerate(pairwise(selected))
-                    if left.level == right.level
-                ),
-                None,
-            )
+            pair = self._select_merge_pair(selected)
             if pair is None:
                 levels = [block.level for block in selected]
                 raise CompressionInvariantError(
@@ -323,52 +316,72 @@ class ContextEngine:
                     f"same-level pair: {levels}"
                 )
             index, left, right = pair
-            source = f"{left.text}\n\n{right.text}"
-            hard_limit = max(
-                1,
-                math.floor(
-                    (left.token_count + right.token_count) * self.settings.summary_target_ratio
-                ),
-            )
-            summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=left.level + 1)
-
-            with self.database.session() as session:
-                repo = AgentRepository(session)
-                repo.get_or_create_conversation(state.thread_id, lock=True)
-                locked = list(
-                    session.scalars(
-                        select(MemoryBlock)
-                        .where(MemoryBlock.id.in_([left.id, right.id]))
-                        .with_for_update()
-                    )
-                )
-                if len(locked) != 2 or any(not block.active for block in locked):
-                    raise CompressionInvariantError("selected memory blocks became inactive")
-                parent = session.scalar(
-                    select(MemoryBlock).where(
-                        MemoryBlock.thread_id == state.thread_id,
-                        MemoryBlock.active.is_(True),
-                        MemoryBlock.begin_message_id == left.begin_message_id,
-                        MemoryBlock.end_message_id == right.end_message_id,
-                        MemoryBlock.level == left.level + 1,
-                    )
-                )
-                if parent is None:
-                    parent = repo.add_memory_block(
-                        thread_id=state.thread_id,
-                        text=summary,
-                        begin_message_id=left.begin_message_id,
-                        end_message_id=right.end_message_id,
-                        level=left.level + 1,
-                        token_count=estimate_tokens(summary),
-                    )
-
-            try:
-                state.selected_blocks[index : index + 2] = [MemoryBlockSnapshot.from_model(parent)]
-            except Exception:
-                self.cache.invalidate(state.thread_id)
-                raise
+            self._merge_pair(state, index, left, right)
             merge_count += 1
+
+    @staticmethod
+    def _select_merge_pair(
+        selected: list[MemoryBlockSnapshot],
+    ) -> tuple[int, MemoryBlockSnapshot, MemoryBlockSnapshot] | None:
+        return next(
+            (
+                (index, left, right)
+                for index, (left, right) in enumerate(pairwise(selected))
+                if left.level == right.level
+            ),
+            None,
+        )
+
+    def _merge_pair(
+        self,
+        state: ThreadContextState,
+        index: int,
+        left: MemoryBlockSnapshot,
+        right: MemoryBlockSnapshot,
+    ) -> None:
+        source = f"{left.text}\n\n{right.text}"
+        hard_limit = max(
+            1,
+            math.floor(
+                (left.token_count + right.token_count) * self.settings.summary_target_ratio
+            ),
+        )
+        summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=left.level + 1)
+        with self.database.session() as session:
+            repo = AgentRepository(session)
+            repo.get_or_create_conversation(state.thread_id, lock=True)
+            locked = list(
+                session.scalars(
+                    select(MemoryBlock)
+                    .where(MemoryBlock.id.in_([left.id, right.id]))
+                    .with_for_update()
+                )
+            )
+            if len(locked) != 2 or any(not block.active for block in locked):
+                raise CompressionInvariantError("selected memory blocks became inactive")
+            parent = session.scalar(
+                select(MemoryBlock).where(
+                    MemoryBlock.thread_id == state.thread_id,
+                    MemoryBlock.active.is_(True),
+                    MemoryBlock.begin_message_id == left.begin_message_id,
+                    MemoryBlock.end_message_id == right.end_message_id,
+                    MemoryBlock.level == left.level + 1,
+                )
+            )
+            if parent is None:
+                parent = repo.add_memory_block(
+                    thread_id=state.thread_id,
+                    text=summary,
+                    begin_message_id=left.begin_message_id,
+                    end_message_id=right.end_message_id,
+                    level=left.level + 1,
+                    token_count=estimate_tokens(summary),
+                )
+        try:
+            state.selected_blocks[index : index + 2] = [MemoryBlockSnapshot.from_model(parent)]
+        except Exception:
+            self.cache.invalidate(state.thread_id)
+            raise
 
     def rebuild(self, thread_id: str) -> list[ContextPiece]:
         return self.cache.pieces(thread_id)

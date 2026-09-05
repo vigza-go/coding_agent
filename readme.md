@@ -232,19 +232,32 @@ TUI 命令：
 想用已经下载的真实 LongMemEval 历史，比较分层摘要和滚动摘要各喂给摘要器多少 token，运行：
 
 ```bash
-uv run python experiments/compare_compression.py --real
+uv run python experiments/lme_timeladder.py
 ```
 
-默认使用 `experiments/_data/lme_s.json` 的第 166 道题，取约 60K tokens 的完整 session，
-在 32K 预算下分别回放两种引擎。分层路径直接复用 `ContextEngine`，滚动路径只替换合并规则。
-`--fake` 可以先做零成本结构检查：
+这会直接读取整道真实数据、使用现有 `ContextEngine` 和真实摘要器。需要零成本检查时，
+先把 `lme_timeladder.py` 顶部的 `FAKE = True`，再运行同一命令：
 
 ```bash
-uv run python experiments/compare_compression.py --fake
+uv run python experiments/lme_timeladder.py
 ```
 
-切换题目或长度：`--case 108 --max-tokens 100000`。输出中的 token 是项目当前的本地估算，
-摘要内容本身来自真实摘要器；真实账单还会受到模型实际分词、重试和缓存影响。
+批量选题只看完整历史 token 长度，并按题型做固定种子的比例抽样。直接运行即可：
+
+```bash
+uv run python experiments/batch.py
+```
+
+再把 `REFRESH_CASES` 改回 `False`，启动正式批量评测并汇总：
+
+```bash
+uv run python experiments/batch.py
+uv run python experiments/report.py
+```
+
+评测代码只保留三个 Python 文件：`lme_timeladder.py` 负责单题回放，`batch.py` 负责选题和
+并发，`report.py` 负责汇总。输出中的 token 是项目当前的本地估算，摘要内容本身来自真实
+摘要器；真实账单还会受到模型实际分词、重试和缓存影响。
 
 ---
 

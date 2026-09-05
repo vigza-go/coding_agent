@@ -8,3 +8,10 @@ config.json
 .artifacts/
 .DS_Store
 
+# 上下文压缩评测的历史数据和产物不入库；简单的对照脚本保留在版本控制中。
+experiments/*
+!experiments/README.md
+!experiments/lme_timeladder.py
+!experiments/batch.py
+!experiments/report.py
+!experiments/EVAL_REPORT_2026-09-06.md
