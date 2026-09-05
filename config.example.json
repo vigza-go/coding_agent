@@ -29,7 +29,8 @@
     "bash_max_output_bytes": 100000,
     "search_enabled": false,
     "search_timeout_seconds": 500,
-    "search_max_results_limit": 10
+    "search_max_results_limit": 10,
+    "subagent_enabled": true
   },
   "context": {
     "total_tokens": 1000000,

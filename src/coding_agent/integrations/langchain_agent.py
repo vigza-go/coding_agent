@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from deepagents import FilesystemMiddleware
@@ -26,6 +28,7 @@ from ..workspace.file_undo import FileMutationRecorder
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
 from .search import SearchClient
+from .subagent import SubAgentJobs
 
 
 def build_model(settings: Settings) -> ChatAnthropic:
@@ -112,6 +115,103 @@ def make_search_tool(client: SearchClient):
 
     return search_tool
 
+
+def shared_filesystem_middleware(settings: Settings) -> FilesystemMiddleware:
+    return FilesystemMiddleware(
+        backend=FilesystemBackend(
+            root_dir=settings.workspace_root,
+            virtual_mode=True,
+            max_file_size_mb=settings.agent.filesystem_max_file_size_mb,
+        )
+    )
+
+
+def shared_agent_tools(
+    *,
+    settings: Settings,
+    context_engine: ContextEngine,
+    bash_executor: BashExecutionService | None,
+    search_client: SearchClient | None,
+    extra_tools: list[Any] | None = None,
+) -> tuple[list[Any], str]:
+    """组装父/子共用的工具面：work_state +（可选）bash +（可选）search + 额外工具。
+
+    返回工具表和一段拼进 system_prompt 的 bash 说明。抽出来是为了父子走同一份实现，
+    不搞两套；子代理只是不传 ``extra_tools``（拿不到 ``run_subagent``，防止再套娃）。
+    """
+
+    tools: list[Any] = [make_work_state_tool(context_engine)]
+    if extra_tools:
+        tools.extend(extra_tools)
+    bash_prompt = ""
+    if settings.agent.bash_enabled:
+        if bash_executor is None:
+            raise RuntimeError("bash is enabled but no BashExecutionService was provided")
+        tools.append(make_bash_tool(bash_executor))
+        bash_prompt = (
+            "\n\nBash 从工作区根目录运行；相对路径基于该目录，绝对路径表示宿主机真实路径，不是"
+            "文件工具的虚拟路径。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "
+            "/undo 恢复。不要把存在读写依赖的 Bash 和文件操作放进同一批工具调用。"
+        )
+    if settings.agent.search_enabled:
+        if search_client is None:
+            raise RuntimeError("search is enabled but no SearchClient was provided")
+        tools.append(make_search_tool(search_client))
+    return tools, bash_prompt
+
+
+def _make_run_subagent_tool(settings: Settings, jobs: SubAgentJobs) -> Any:
+    """父侧的 ``run_subagent``：派活不等，但**本轮结束前会等它交卷**。
+
+    派遣走独立子进程：父子之间不共享进程内的任何东西（子进程自建房的一整套服务），只通过
+    命令行传 ``(parent_thread, parent_seq)``、任务文件与配置绝对路径。子进程把报告写到
+    stdout（已重定向成文件），父进程在本轮收尾时按任务号取回。
+    """
+
+    @tool("run_subagent", parse_docstring=True)
+    def run_subagent(task: str) -> str:
+        """把一份可独立完成的活儿交给子代理进程去做，立刻返回任务号，不在这儿等。
+
+        适合"要读很多文件/跑很多命令、但不必占用主对话上下文"的调研或批量改动。派出去就
+        继续干你自己的事；等你说完了，这一轮会等它交卷并把报告给你，你据此继续干活或再派活
+        ——所以不必自己写"稍后再查"之类的话。子代理看不到用户也看不到主对话，``task`` 必须
+        自包含：目标、范围、要交什么、何时该停。它的文件改动会记在当前这一轮名下，主代理
+        ``/undo`` 可一并撤销。
+
+        Args:
+            task: 交给子代理的完整任务说明书。
+        """
+
+        configurable = get_config().get("configurable", {})
+        parent_thread = str(configurable.get("thread_id", ""))
+        parent_seq = int(configurable.get("user_seq", 0))
+
+        def build(task_path: Path) -> list[str]:
+            return [
+                sys.executable,
+                "-m",
+                "coding_agent.integrations.subagent",
+                "--parent-thread",
+                parent_thread,
+                "--parent-seq",
+                str(parent_seq),
+                # 无条件透传父实际用的那份配置绝对路径：子进程 cwd 是 workspace，
+                # 若只靠默认 "config.json" 会在别处读成空配置（真机踩过一次）。
+                "--config",
+                str(settings.config_path),
+                "--task-file",
+                str(task_path),
+            ]
+
+        task_id = jobs.spawn(task, build, cwd=str(settings.workspace_root))
+        return (
+            f"已派遣子代理 #{task_id}，不必等它，继续手上的事。"
+            "等你这一轮说完，系统会在收工前把它的报告取回来给你。"
+        )
+
+    return run_subagent
+
+
 @contextmanager
 def create_langchain_agent(
     *,
@@ -122,14 +222,8 @@ def create_langchain_agent(
     model: ChatAnthropic,
     bash_executor: BashExecutionService | None,
     search_client: SearchClient | None,
+    jobs: SubAgentJobs,
 ) -> Generator[Any, None, None]:
-    filesystem = FilesystemMiddleware(
-        backend=FilesystemBackend(
-            root_dir=settings.workspace_root,
-            virtual_mode=True,
-            max_file_size_mb=settings.agent.filesystem_max_file_size_mb,
-        )
-    )
     runtime_middleware = AgentRuntimeMiddleware(
         persistence=MessagePersistenceService(database, context_engine),
         context_projection=ContextProjectionService(context_engine),
@@ -147,21 +241,16 @@ def create_langchain_agent(
         file_mutations=recorder,
         tool_result_inline_tokens=settings.context.tool_result_inline_tokens,
     )
-    tools = [make_work_state_tool(context_engine)]
-    bash_prompt = ""
-    if settings.agent.bash_enabled:
-        if bash_executor is None:
-            raise RuntimeError("bash is enabled but no BashExecutionService was provided")
-        tools.append(make_bash_tool(bash_executor))
-        bash_prompt = (
-            "Bash 从工作区根目录运行；相对路径基于该目录，绝对路径表示宿主机真实路径，不是"
-            "文件工具的虚拟路径。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "
-            "/undo 恢复。不要把存在读写依赖的 Bash 和文件操作放进同一批工具调用。"
-        )
-    if settings.agent.search_enabled:
-        if search_client is None:
-            raise RuntimeError("search is enabled but no SearchClient was provided")
-        tools.append(make_search_tool(search_client))
+    extra_tools = (
+        [_make_run_subagent_tool(settings, jobs)] if settings.agent.subagent_enabled else []
+    )
+    tools, bash_prompt = shared_agent_tools(
+        settings=settings,
+        context_engine=context_engine,
+        bash_executor=bash_executor,
+        search_client=search_client,
+        extra_tools=extra_tools,
+    )
 
     # 不配置 checkpointer：应用库的 messages 表才是唯一真相源。AgentRuntimeMiddleware.before_model
     # 在每次模型调用前用业务库投影整体覆盖 messages 通道，所以 checkpoint 里的快照既不进 prompt、
@@ -169,14 +258,21 @@ def create_langchain_agent(
     # 而读一次要 10s）。跨步骤状态由 Pregel 在进程内持有，一轮之内的执行不依赖持久化。
     # 需要 LangGraph 原生 interrupt() 式人工审批时再开回来，届时应选 Shallow/SQLite 这类
     # 「每线程只留最新」的 saver，别再按图步骤写全量快照。
-    middleware: list[AgentMiddleware[Any, Any, Any]] = [runtime_middleware, filesystem]
+    middleware: list[AgentMiddleware[Any, Any, Any]] = [
+        runtime_middleware,
+        shared_filesystem_middleware(settings),
+    ]
     yield create_agent(
         model=model,
         tools=tools,
         middleware=middleware,
         context_schema=RunContext,
         system_prompt=(
-            "你是编码代理。合理使用文件与工作状态工具，保持回答简洁。"
+            "你是编码代理。合理使用文件与工作状态工具，保持回答简洁，不要过度设计。"
+            """
+              请用通俗的语言表达，不要过度使用术语，
+              注意模仿用户的表达风格。
+            """
             "所有文件工具路径使用以 / 开头、相对于工作区根目录的虚拟路径。"
             f"{bash_prompt}"
         ),

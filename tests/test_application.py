@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import signal
+import sys
+import threading
+import time
+
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from sqlalchemy import select
 
 from coding_agent.application import AgentApplication, TurnExecutionError
 from coding_agent.config import ContextSettings, Settings
 from coding_agent.context.engine import ContextEngine
 from coding_agent.context.summarizer import DeterministicSummarizer
+from coding_agent.persistence.message_codec import decode_message
+from coding_agent.persistence.models import Message
 from coding_agent.workspace.file_undo import FileMutationRecorder
 
 
@@ -109,3 +117,174 @@ def test_finalization_error_does_not_hide_original_turn_error(database, tmp_path
     assert raised.value.finalization_errors == (
         "补齐工具结果失败：RuntimeError: database unavailable",
     )
+
+
+class ScriptedAgent:
+    """假代理：按脚本回答，并把每次 invoke 的入参记下来供断言。"""
+
+    def __init__(self, *answers) -> None:
+        self.answers = list(answers)
+        self.calls: list[tuple[object, object]] = []
+
+    def invoke(self, state, *, config, context):
+        self.calls.append((state, context))
+        answer = self.answers.pop(0) if self.answers else "收尾"
+        return {"messages": [AIMessage(id=f"answer-{len(self.calls)}", content=answer)]}
+
+    def update_state(self, *args, **kwargs):
+        del args, kwargs
+
+
+class StubJobs:
+    """假登记处：第一次收齐给一份报告，之后没有待收的活儿。"""
+
+    def __init__(self, reports=("\n#1（退出码 0）\n子代理报告\n",)) -> None:
+        self.reports = list(reports)
+        self.terminated = 0
+
+    def finish_turn(self):
+        return self.reports.pop(0) if self.reports else None
+
+    def terminate_all(self):
+        self.terminated += 1
+
+
+def _app(database, tmp_path, agent, jobs=None):
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    return AgentApplication(
+        Settings(workspace_root=tmp_path),
+        database,
+        agent,
+        engine,
+        FileMutationRecorder(database, tmp_path),
+        subagent_jobs=jobs,
+    )
+
+
+def test_subagent_reports_are_collected_inside_the_same_turn(database, tmp_path):
+    """本轮派出去的子代理，报告必须在**同一个 user_seq** 里收回来并续跑，绝不拖到下次按键。"""
+
+    agent = ScriptedAgent("派完活就说半句")
+    jobs = StubJobs()
+    app = _app(database, tmp_path, agent, jobs)
+
+    app.run_turn("t1", "去做调研")
+
+    assert len(agent.calls) == 2, "报告回来之后必须再喂模型一步，否则它看不到结论"
+    injected, context = agent.calls[1]
+    assert context is agent.calls[0][1], "整轮要共用一个 RunContext，额度才会被统一封住"
+    assert "子代理报告" in injected["messages"][0].content
+    # 报告得进时间轴，且挂在当前这一轮名下（投影只认库里的行，不认函数入参）
+    with database.session() as session:
+        rows = session.execute(select(Message).where(Message.user_seq == 1)).scalars().all()
+    decoded = [decode_message(row) for row in rows]
+    reports = [
+        message for message in decoded if getattr(message, "name", None) == "subagent_report"
+    ]
+    assert len(reports) == 1
+    assert reports[0].content.startswith("【子代理回报】")
+
+
+def test_turn_waits_until_every_report_is_drained(database, tmp_path):
+    """一次收齐多份、模型又派了活：要把队列掏干净才允许本轮结束。"""
+
+    agent = ScriptedAgent()
+    jobs = StubJobs(reports=("#1 报告\n", "#2 报告\n"))
+    app = _app(database, tmp_path, agent, jobs)
+
+    app.run_turn("t1", "去做调研")
+
+    assert len(agent.calls) == 3
+    assert "子代理回报" in agent.calls[1][0]["messages"][0].content
+    assert "子代理回报" in agent.calls[2][0]["messages"][0].content
+
+
+def test_interrupted_turn_terminates_running_children(database, tmp_path):
+    """Ctrl-C 打的是"这一轮"：正在飞的子代理跟着一起停，不给作废的回合继续写文件。"""
+
+    class InterruptingAgent:
+        def invoke(self, *args, **kwargs):
+            del args, kwargs
+            raise KeyboardInterrupt
+
+        def update_state(self, *args, **kwargs):
+            del args, kwargs
+
+    jobs = StubJobs()
+    app = _app(database, tmp_path, InterruptingAgent(), jobs)
+
+    with pytest.raises(TurnExecutionError):
+        app.run_turn("t1", "去做调研")
+
+    assert jobs.terminated == 1
+
+
+def test_turn_blocks_until_real_child_exits(database, tmp_path):
+    """真起子进程：父模型说完话之后，本轮要**真的等**到它退出，报告才进得了时间轴。
+
+    用 ``sleep`` 假装有活儿，不碰 API；测的是"等待发生在本轮之内"这个新边界。
+    """
+
+    from coding_agent.integrations.subagent import SubAgentJobs
+
+    jobs = SubAgentJobs(tmp_path / "art")
+
+    slow = [sys.executable, "-c", "import time;time.sleep(2);print('跑完了')"]
+
+    class SpawningAgent(ScriptedAgent):
+        def invoke(self, state, *, config, context):
+            if not self.calls:
+                jobs.spawn("慢活儿", lambda p: slow, cwd=str(tmp_path))
+            return super().invoke(state, config=config, context=context)
+
+    agent = SpawningAgent("我先说半句")
+    app = _app(database, tmp_path, agent, jobs)
+    started = time.monotonic()
+
+    app.run_turn("t1", "去做调研")
+
+    assert time.monotonic() - started >= 1.5, "本轮没等住子进程"
+    assert len(agent.calls) == 2, "报告回来应当只续跑一步，父模型不再派活就该收工"
+    injected = agent.calls[1][0]["messages"][0].content
+    assert "#1" in injected and "退出码 0" in injected and "跑完了" in injected
+
+
+def test_ctrl_c_while_waiting_kills_parent_and_child(database, tmp_path):
+    """等子代理的这段时间里按 Ctrl-C：这一下打的是"这一轮"，父子一起停。
+
+    真发一个 SIGINT 给主线程（等价于用户在终端按键），不看返回值编故事。
+    """
+
+    from coding_agent.integrations.subagent import SubAgentJobs
+
+    jobs = SubAgentJobs(tmp_path / "art")
+    spawned = []
+
+    class SpawningAgent(ScriptedAgent):
+        def invoke(self, state, *, config, context):
+            if not self.calls:
+                pid = jobs.spawn(
+                    "永远跑不完",
+                    lambda p: [sys.executable, "-c", "import time;time.sleep(60)"],
+                    cwd=str(tmp_path),
+                )
+                spawned.append(pid)
+            return super().invoke(state, config=config, context=context)
+
+    agent = SpawningAgent("我还在等子代理")
+    app = _app(database, tmp_path, agent, jobs)
+
+    def interrupt_later():
+        time.sleep(1.0)
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+
+    threading.Thread(target=interrupt_later, daemon=True).start()
+
+    with pytest.raises(TurnExecutionError) as raised:
+        app.run_turn("t1", "去做调研")
+
+    assert raised.value.interrupted is True
+    assert len(agent.calls) == 1, "被打断了就不该再续跑，报告也不该被当成用户输入"
+    process = jobs._jobs[spawned[0]]["process"]
+    process.wait(timeout=10)
+    assert process.poll() is not None, "父轮停了，子进程还活着 —— 那它会往作废的回合里写文件"

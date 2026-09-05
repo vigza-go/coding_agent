@@ -15,6 +15,7 @@ from .context.summarizer import LangChainSummarizer
 from .integrations.langchain_agent import build_model, build_summary_model, create_langchain_agent
 from .integrations.middleware import RunContext
 from .integrations.search import make_search_client
+from .integrations.subagent import SubAgentJobs
 from .persistence.database import Database
 from .persistence.message_codec import decode_message, encode_message
 from .persistence.models import MessageType
@@ -87,6 +88,7 @@ class AgentApplication:
         context_engine: ContextEngine,
         recorder: FileMutationRecorder,
         bash_executor: BashExecutionService | None = None,
+        subagent_jobs: Any = None,
     ) -> None:
         self.settings = settings
         self.database = database
@@ -94,6 +96,8 @@ class AgentApplication:
         self.recorder = recorder
         self.context_engine = context_engine
         self.bash_executor = bash_executor
+        # 外派的子代理登记处；本轮收工前靠它把报告等回来，None 表示功能未开。
+        self.subagent_jobs = subagent_jobs
         self.message_persistence = MessagePersistenceService(database, context_engine)
         self.rollback_service = RollbackService(database, context_engine, recorder)
 
@@ -153,11 +157,25 @@ class AgentApplication:
         if on_event is not None:
             config["callbacks"] = [ProgressCallbackHandler(on_event)]
         try:
+            # 整轮共用一个 RunContext：额度计数挂在它身上，所以"父说的那几步 + 为处理
+            # 子代理报告而续跑的几步"合起来受一次 model_call_limit 封顶，不会续跑一次就
+            # 重新领一份额度。
+            run_context = RunContext(thread_id, user_seq)
             response = self.agent.invoke(
                 {"messages": [human]},
                 config=config,
-                context=RunContext(thread_id, user_seq),
+                context=run_context,
             )
+            # 父模型给出答案不等于本轮结束：它派出去、还没交回的子代理算本轮的一部分。
+            # 等齐 → 报告作为一条注入消息再喂一步（模型据此继续干活，也可能又派新活），
+            # 循环到没有待收的活儿为止。这期间输入框根本没在等输入，用户发不进新消息，
+            # 所以 Ctrl-C 打的是"这一轮"，父子一起停。
+            while (report := self._collect_subagent_reports(thread_id, user_seq)) is not None:
+                response = self.agent.invoke(
+                    {"messages": [report]},
+                    config=config,
+                    context=run_context,
+                )
         except KeyboardInterrupt as error:
             closed_tool_results, finalization_errors = self._finalize_failed_turn(
                 thread_id, user_seq
@@ -190,8 +208,43 @@ class AgentApplication:
             None,
         )
 
+    def _collect_subagent_reports(self, thread_id: str, user_seq: int) -> HumanMessage | None:
+        """等齐本轮外派的子代理，把报告落成一条可投影的消息；没有待收的任务就返回 None。
+
+        投影时 messages 通道是被整体覆盖的（见 ``AgentRuntimeMiddleware.before_model``），
+        所以报告必须像用户那句话一样先入库，模型才看得见它 —— 不能只塞进 invoke 的入参。
+        """
+
+        if self.subagent_jobs is None:
+            return None
+        report = self.subagent_jobs.finish_turn()  # 阻塞点：Ctrl-C 会打在这里
+        if report is None:
+            return None
+        # 包成 HumanMessage 但打上 name，理由跟压缩历史那条一样（见 ContextProjectionService）：
+        # 它是"系统侧递进来的材料"，不是用户敲的话；靠 name 区分，不新增 role 或表。
+        message = HumanMessage(
+            id=str(uuid.uuid4()), name="subagent_report", content=f"【子代理回报】\n{report}"
+        )
+        with self.database.session() as session:
+            row = AgentRepository(session).add_message(
+                thread_id=thread_id,
+                user_seq=user_seq,
+                message_type=MessageType.USER,
+                content_json=encode_message(message),
+                langchain_message_id=message.id,
+            )
+        self.context_engine.append_messages(thread_id, [row])
+        return message
+
     def _finalize_failed_turn(self, thread_id: str, user_seq: int) -> tuple[int, tuple[str, ...]]:
         errors: list[str] = []
+        # 本轮派出去、还在飞的子代理跟着一起终止：它们记的账也挂在这一轮名下，
+        # 留着只会往一个已经作废的回合里写文件。
+        if self.subagent_jobs is not None:
+            try:
+                self.subagent_jobs.terminate_all()
+            except Exception as error:  # noqa: BLE001 - preserve the original turn failure
+                errors.append(f"终止子代理失败：{type(error).__name__}: {error}")
         if self.bash_executor is not None:
             try:
                 self.bash_executor.interrupt_all()
@@ -281,6 +334,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         else None
     )
     search_client = make_search_client(settings.agent)
+    jobs = SubAgentJobs(settings.artifact_dir)
     with create_langchain_agent(
         settings=settings,
         database=database,
@@ -289,6 +343,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         model=model,
         bash_executor=bash_executor,
         search_client=search_client,
+        jobs=jobs,
     ) as agent:
         try:
             yield AgentApplication(
@@ -298,7 +353,10 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
                 context_engine,
                 recorder,
                 bash_executor,
+                subagent_jobs=jobs,
             )
         finally:
             # 会话退出即放锁。进程被强杀时不用管：锁随连接被服务端收回。
             database.turn_guard.release()
+            # 还活着的外派子代理跟着一起收：父进程都没了，报告没人取。
+            jobs.terminate_all()

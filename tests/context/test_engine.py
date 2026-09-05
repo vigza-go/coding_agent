@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from threading import Barrier, Lock, get_ident
 
 from coding_agent.config import ContextSettings
@@ -37,17 +38,24 @@ def add_messages(database, count: int, *, chars: int = 80) -> list[Message]:
         return rows
 
 
+# 当传声筒用：LangChain 的回调就是挂在这种"当前这条执行线"的变量上往下传的，
+# 用它验压缩工作线程还看不看得见外层的东西，比直接测回调更直白。
+PROBE: ContextVar[str] = ContextVar("probe", default="")
+
+
 class ConcurrentTrackingSummarizer:
     def __init__(self, workers: int) -> None:
         self.barrier = Barrier(workers)
         self.lock = Lock()
         self.thread_ids: set[int] = set()
+        self.probe_values: list[str] = []
 
     def summarize(self, text: str, *, hard_limit: int, level: int, attempt: int) -> str:
         del text, hard_limit, attempt
         if level == 0:
             with self.lock:
                 self.thread_ids.add(get_ident())
+                self.probe_values.append(PROBE.get())
             self.barrier.wait(timeout=3)
         return "x"
 
@@ -159,6 +167,33 @@ def test_l0_chunk_summaries_run_concurrently(database):
 
     assert result.l0_blocks_created == 4
     assert len(summarizer.thread_ids) == 4
+
+
+def test_l0_summaries_still_see_the_callers_context(database):
+    """压缩跑在线程池里，但外层这条执行线上的东西必须还能看见 —— LangChain 的回调
+    （界面上"正在压缩记忆 L0"就是它送的）正挂在这儿，看不见就等于全程隐身。
+    """
+
+    add_messages(database, 12, chars=100)
+    summarizer = ConcurrentTrackingSummarizer(workers=4)
+    settings = ContextSettings(
+        total_tokens=300,
+        compression_ratio=0.25,
+        working_trigger_ratio=0.50,
+        recent_tail_ratio=0.20,
+        l0_block_count=4,
+        summary_concurrency=4,
+        summary_target_ratio=0.50,
+        summary_max_attempts=2,
+    )
+    token = PROBE.set("外层")
+    try:
+        result = ContextEngine(database, settings, summarizer).compact_if_needed("t1")
+    finally:
+        PROBE.reset(token)
+
+    assert result.l0_blocks_created == 4
+    assert summarizer.probe_values == ["外层"] * 4
 
 
 def test_greedy_cover_prefers_longest_valid_block(database):

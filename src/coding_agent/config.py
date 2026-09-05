@@ -82,8 +82,13 @@ class AgentSettings:
     search_api_key: str = ""
     search_timeout_seconds: int = 500
     search_max_results_limit: int = 10
+    # 子代理：另起进程跑一套完整 agent，默认开。工具/额度/超时等一律沿用父的
+    # model_call_limit / tool_call_limit / tool_retry_max，不再复制一份改数。
+    subagent_enabled: bool = True
 
     def __post_init__(self) -> None:
+        if not isinstance(self.subagent_enabled, bool):
+            raise TypeError("subagent_enabled must be a boolean")
         positive_values = {
             "tool_retry_max": self.tool_retry_max,
             "tool_call_limit": self.tool_call_limit,
@@ -156,6 +161,9 @@ class Settings:
     database_url: str = "mysql+pymysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
     artifact_dir: Path = field(default_factory=lambda: Path.cwd() / ".artifacts")
+    # 解析后的配置文件绝对路径。子代理是独立进程、cwd 可能不同，必须按这个绝对路径回读
+    # 同一份配置，否则会像“在 workspace 里找不到 config.json”那样静默读成空配置。
+    config_path: Path = field(default_factory=lambda: Path("config.json").resolve())
     llm: LLMSettings = field(default_factory=LLMSettings)
     summary_llm: SummaryLLMSettings = field(default_factory=SummaryLLMSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
@@ -187,6 +195,7 @@ def _environment_bool(name: str, default: bool) -> bool:
 
 def load_settings(path: str | Path | None = None) -> Settings:
     config_path = Path(path or os.getenv("AGENT_CONFIG", "config.json"))
+    resolved_config_path = config_path.resolve()
     raw = _read_json(config_path)
     llm_raw = raw.get("llm", {})
     context_raw = raw.get("context", {})
@@ -208,6 +217,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
     for field_name, environment_name in (
         ("bash_enabled", "AGENT_BASH_ENABLED"),
         ("search_enabled", "AGENT_SEARCH_ENABLED"),
+        ("subagent_enabled", "AGENT_SUBAGENT_ENABLED"),
     ):
         default = agent_values.get(field_name, getattr(AgentSettings, field_name))
         if not isinstance(default, bool):
@@ -270,6 +280,7 @@ def load_settings(path: str | Path | None = None) -> Settings:
         database_url=os.getenv("DATABASE_URL", raw.get("database_url", Settings.database_url)),
         workspace_root=workspace,
         artifact_dir=artifact_dir,
+        config_path=resolved_config_path,
         llm=llm,
         summary_llm=summary_llm,
         context=ContextSettings(**context_raw),

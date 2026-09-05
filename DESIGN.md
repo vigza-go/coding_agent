@@ -23,6 +23,7 @@ repository；框架中间件也不进入 context、workspace 等核心模块。
 - `conversations.active_head_seq` 是当前有效历史的最大用户轮次，空历史为 0。
 - `memory_blocks.active` 只表示块仍属于有效历史。
 - 同一条 thread 在同一时刻只有一个会话待在里面（含空着不说话的会话）；该占用挂在数据库连接上，连接消失即失效。
+- 持锁连接只由拿锁的那个线程碰（进入、离开、每轮开头）；轮次中间并行工具线程走的 `verify` 只读游标。
 - 当前压缩块集合不单独持久化：缓存首次加载或撤销后，从左端开始选择最长 active block，
   由 greedy cover 动态推导。父块生成后，父子都保持 active；父块因覆盖范围更长而自然
   取代子块进入当前上下文。
@@ -103,12 +104,15 @@ acquire 并一直持有，切走或退出才 release。所以一个开着终端�
 清理界面；也刻意没做 `/takeover` 强制接管——真被卡住就 `ps` 找到那个会话把它退出。不报占用者是谁，
 想知道是哪个进程 `ps` 一眼就够，为此多养一条查询和一堆透传字段不值。
 
-每次写时间轴前 `TurnGuard.verify` 做两件事：先在**原来那条持锁连接**上 `GET_LOCK(name, 0)` 复核
-（同连接重取立即返回 1，顺带重置 `wait_timeout` 的空闲计时），再比对
-`(active_head_seq, next_user_seq) == (user_seq, user_seq + 1)`。这个等式由本轮开头的
-`reserve_user_seq` 写下，本轮之内没有别的代码再动这两列，所以等式还成立就等于空窗期没有别的会话
-写入或回滚过。**本轮之内**连接报错不换新连接重取 —— 那等于静默接管，正是"锁丢了却还在写"的根源，
-直接抛 `TurnAbortedError` 终止本轮。跨会话的重取只发生在 `acquire`（每轮开头一次）：会话空闲太久时
+每次写时间轴前 `TurnGuard.verify` 只比游标：`(active_head_seq, next_user_seq) == (user_seq,
+user_seq + 1)`。这个等式由本轮开头的 `reserve_user_seq` 写下，本轮之内没有别的代码再动这两列，
+所以等式还成立就等于没有别的会话写入或回滚过。**verify 刻意不去碰那条持锁连接**：一轮里工具是
+并行执行的，每个分支各自在自己的线程里调 `verify`，而 SQLAlchemy 的连接不是线程安全的 —— 真机
+踩过两个线程同时 `GET_LOCK` 互相踩事务，把持锁连接弄死、锁随之消失，之后每一轮都误判"占用已失效"，
+整条会话再也跑不动。锁的存活只在每轮开头的 `acquire`（幂等续期）确认一次，那里必然是拿锁的线程
+自己。少了轮中复核也不等于会双写：接管者要写就得先占游标，等式立刻不成立。
+
+跨会话的重取只发生在 `acquire`（每轮开头一次）：会话空闲太久时
 `wait_timeout` 会收走连接、锁随之消失而本机不知情，此时重取一次是合法的 —— 拿得回来说明没人动过，
 拿不回来就报 `ThreadBusyError`（真被接管了），而空窗期里若有人写过，紧随其后的 seq 比对仍然会拦住。
 
@@ -117,8 +121,9 @@ acquire 并一直持有，切走或退出才 release。所以一个开着终端�
 要真隔离时用 Git worktree（见 readme）。
 
 SQLite 没有跨会话咨询锁，锁的部分直接不做（单进程不会自己跟自己抢），seq 检测照常生效。真实行为
-由 gated 的 `tests/integrations/test_thread_lock_mysql.py` 验证：跨连接互斥、持锁连接被 `KILL` 后
-本轮终止、空窗期被别的会话推进时终止。
+由 gated 的 `tests/integrations/test_thread_lock_mysql.py` 验证：跨连接互斥、切换时先抢新的再让出
+旧的、空闲被 `wait_timeout` 收走后下一轮开头重取（取不回就报错，绝不换连接静默接管）、空窗期被
+别的会话推进时终止本轮，以及并行工具线程同时 `verify` 不得把锁搞丢。
 
 项目只注册一个 AgentRuntimeMiddleware，并由它显式编排上下文投影、调用额度、工具执行、文件
 mutation、artifact 和消息持久化等普通 service。FilesystemMiddleware 仍单独保留用于注册和执行
