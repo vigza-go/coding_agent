@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import signal
 from contextlib import contextmanager
 from io import StringIO
 from types import SimpleNamespace
@@ -194,3 +196,98 @@ def test_busy_thread_is_reported_without_traceback(monkeypatch):
     printed = output.getvalue()
     assert "本轮未开始" in printed
     assert "Traceback" not in printed
+
+
+def _watcher_probe(monkeypatch, *outcomes):
+    """把 _watch_terminal 变成一段可观察的同步执行：``outcomes`` 是 ``_tty_lost()`` 的判定
+    序列，用剩最后一个就一直重复它。返回观察到的动作。"""
+    acts: list[object] = []
+    seq = list(outcomes)
+
+    def lost() -> bool:
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    monkeypatch.setattr(tui, "_tty_lost", lost)
+    monkeypatch.setattr(tui, "_TTY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(tui, "_TTY_EXIT_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(tui, "sleep", lambda seconds: acts.append(("等", seconds)))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: acts.append(("信号", pid, sig)))
+
+    def hard_exit(code: int) -> None:  # 真 os._exit 不返回，这里必须抛出来才收得住循环
+        acts.append(("退出", code))
+        raise SystemExit(code)
+
+    monkeypatch.setattr(os, "_exit", hard_exit)
+    return acts
+
+
+def test_closing_the_terminal_stops_a_turn_in_progress(monkeypatch):
+    """关标签页是用户的显式意图（"我不想看了"），所以正在跑 turn 也得停：先给自己一发
+    Ctrl-C 走既有中断收尾（杀本轮 bash 进程组、终止子代理、结清时间轴、放出座位），
+    收尾不配合就硬退。"""
+    ui, *_ = make_ui(monkeypatch)
+
+    # 回归：曾把"打印一句提示"写在退出之前，往已撤销的终端写字抛 OSError(EIO) 把这个线程
+    # 摔死在退出前面，座位照样没还（真机 22:27 / 22:30 两只鬼就是这么留下的）。这里连提示
+    # 都不许有：console.print 一旦被动过就抛。
+    def eio(*args, **kwargs):
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(ui.console, "print", eio)
+    acts = _watcher_probe(monkeypatch, False, False, True, True)  # 先确认终端在，再连着没了
+
+    with pytest.raises(SystemExit):
+        ui._watch_terminal()
+
+    assert ("信号", os.getpid(), signal.SIGINT) in acts
+    assert acts[-1] == ("退出", 0)
+
+
+def test_watcher_waits_while_the_terminal_is_alive(monkeypatch):
+    """终端好好的，一个信号都不许发、一次都不许退。"""
+    ui, *_ = make_ui(monkeypatch)
+    acts = _watcher_probe(monkeypatch, False)
+
+    def one_lap(seconds: float) -> None:  # 跑完一轮判定就收工
+        raise SystemExit(0)
+
+    monkeypatch.setattr(tui, "sleep", one_lap)
+    with pytest.raises(SystemExit):
+        ui._watch_terminal()
+
+    assert acts == []
+
+
+def test_watcher_stays_out_of_the_way_without_a_controlling_terminal(monkeypatch):
+    """被脚本直接拉起（没有 shell 认领那块 pty）时，``tcgetpgrp`` 一上来就抛 ENOTTY，看着
+    像"终端没了"。这时判据没资格说话：不许动信号、不许退出，自检自己收工。"""
+    ui, *_ = make_ui(monkeypatch)
+    acts = _watcher_probe(monkeypatch, True)
+
+    ui._watch_terminal()  # 自己 return，走不到兜底的 os._exit
+
+    assert not [a for a in acts if a[0] in ("信号", "退出")]
+
+
+def test_terminal_probe_treats_revoked_terminal_as_gone(monkeypatch):
+    """Terminal 关标签页只撤销 pty、不发挂断，所以只能靠自己问。两个问法各管一段坏状态。"""
+    monkeypatch.setattr(os, "open", lambda *args, **kwargs: 7)
+    monkeypatch.setattr(os, "close", lambda fd: None)
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: os.getpgrp())
+    assert tui._tty_lost() is False
+
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: 0)
+    assert tui._tty_lost() is True  # 终端已销毁：没有前台作业组了
+
+    def gone(fd):
+        raise OSError(25, "Inappropriate ioctl for device")
+
+    monkeypatch.setattr(os, "tcgetpgrp", gone)
+    assert tui._tty_lost() is True
+
+    def no_ctty(*args, **kwargs):
+        raise OSError(6, "No such device or address")
+
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: os.getpgrp())
+    monkeypatch.setattr(os, "open", no_ctty)
+    assert tui._tty_lost() is True  # 中间态：master 关了、slave 还开着，tcgetpgrp 看不出来

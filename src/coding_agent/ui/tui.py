@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import sys
+import threading
 from html import escape as html_escape
-from time import monotonic
+from time import monotonic, sleep
 
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -51,6 +55,31 @@ def _input_bindings() -> KeyBindings:
     return bindings
 
 
+_TTY_POLL_SECONDS = 1.0
+_TTY_SAMPLES = 2  # 连续几次同一结论才作数（也绕开 shell 换前台那一瞬返回 0）
+_TTY_EXIT_GRACE_SECONDS = 8.0  # 够 bash 的 interrupt_all 等满它那 5 秒子进程收尾
+
+
+def _tty_lost() -> bool:
+    """我们还能不能使唤这块终端。两个问法都要，因为它们覆盖的坏状态不一样：
+
+    - ``/dev/tty`` 打不开（ENXIO）= 本进程已经没有控制终端了。pty 的主端一关，内核就把终端
+      从整个会话上摘掉（进程表里的 `e_tdev` 变 -1，实测），此刻 slave 还开着、`isatty` 还
+      说 True，光看 fd 是看不出来的。
+    - ``os.tcgetpgrp(0)`` 返回 0 或抛 ENOTTY = 终端已被撤销/销毁、没有前台作业组了。它不吞
+      输入，比读 fd 安全；但只在终端彻底销毁时才可靠。
+    """
+    try:
+        fd = os.open(os.ctermid(), os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return True
+    os.close(fd)
+    try:
+        return os.tcgetpgrp(0) == 0
+    except OSError:
+        return True
+
+
 class TerminalUI:
     def __init__(self, app: AgentApplication, console: Console, *, thread_id: str, debug: bool):
         self.app = app
@@ -73,6 +102,11 @@ class TerminalUI:
             f"[bold]Coding Agent[/bold] · "
             f"thread=[cyan]{markup_escape(self.thread_id)}[/cyan]\n{HELP}"
         )
+        # 关掉标签页就是"我不想看了"：不管此刻是在等输入还是在跑 turn，终端没了就该停。
+        # 之所以要自己发现：Terminal.app 关标签页只杀 shell、只撤销 pty，不给作业发挂断
+        # （实测，见 _watch_terminal），所以在外面等不到任何人来通知我们。
+        if sys.stdin.isatty():  # 管道喂输入、pytest 这类没有终端的场景不探测
+            threading.Thread(target=self._watch_terminal, daemon=True).start()
         # 进入即占用：这条轨道里已经有别的会话（哪怕它正闲着不说话）就不启动。
         self.app.enter_thread(self.thread_id)
         while True:
@@ -111,6 +145,38 @@ class TerminalUI:
                 self._error(str(error))
                 if self.debug:
                     self.console.print_exception(show_locals=False)
+
+    def _watch_terminal(self) -> None:
+        """终端没了就停手。整条会话期间都跑着，不区分"在等输入"还是"在跑 turn"——
+        关标签页是用户的显式意图（"我不想看了"），那时候会话正在干什么不该由我们挑。
+
+        实测：Terminal.app 关标签页只杀 shell、只撤销 pty，**不给前台作业组发挂断**，
+        所以外部不会有任何信号来停我们；zsh 的 nohup/hup、进程组、Ctrl-Z 都与此无关。
+        """
+        gone = 0
+        alive = 0
+        armed = False  # 先确认"终端曾在"，之后失去它才算数
+        while True:
+            sleep(_TTY_POLL_SECONDS)
+            if not _tty_lost():
+                gone, alive = 0, alive + 1
+                armed = armed or alive >= _TTY_SAMPLES
+                continue
+            alive, gone = 0, gone + 1
+            if gone < _TTY_SAMPLES:
+                continue
+            if not armed:
+                # 从来没见到过控制终端：这进程是被脚本直接拉起的（没有 shell 认领那块 pty，
+                # tcgetpgrp 一上来就抛 ENOTTY），判据没资格说话，退出自检别去搅它。
+                return
+            # 先给自己一发 Ctrl-C，走 run_turn 既有的中断收尾：杀掉本轮 bash 的整个进程组、
+            # 终止在飞的子代理、把半截工具批次结清在时间轴上，一路 unwind 顺带放出座位。
+            os.kill(os.getpid(), signal.SIGINT)
+            # 收尾不一定走得完（可能正堵在模型的网络读上），到点硬退。硬退也不脏：进程一死
+            # socket 就断，未提交的事务由服务端回滚，这条 thread 的座位当秒收回。
+            # 全程不往屏幕打一个字——终端已经没了，写它就是 OSError(EIO)，会把这个线程摔死。
+            sleep(_TTY_EXIT_GRACE_SECONDS)
+            os._exit(0)
 
     def _handle_command(self, command: ParsedCommand) -> bool:
         if command.name == "exit":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from itertools import pairwise
 
@@ -252,7 +253,17 @@ class ContextEngine:
         with ThreadPoolExecutor(
             max_workers=min(self.settings.summary_concurrency, len(chunks))
         ) as executor:
-            generated = list(executor.map(self._summarize_l0_chunk, chunks))
+            # 每个任务出发前先复制一份当前上下文。新线程不继承 contextvar，而 LangChain
+            # 的回调（进度里"正在压缩记忆 L0"就是它送出去的）正是挂在 contextvar 上往下
+            # 传的；不带副本，整段压缩在界面上完全隐身（实测：同线程 4 条事件、线程池 0
+            # 条）。副本必须一个任务一份 —— 同一个 Context 不能被多个线程并发进入。
+            contexts = [copy_context() for _ in chunks]
+            generated = list(
+                executor.map(
+                    lambda carried: carried[0].run(self._summarize_l0_chunk, carried[1]),
+                    zip(contexts, chunks, strict=True),
+                )
+            )
 
         inserted: list[MemoryBlock] = []
         with self.database.session() as session:

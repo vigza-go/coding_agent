@@ -333,6 +333,63 @@ def test_failed_summary_does_not_change_cached_messages(database):
         assert repo.memory_blocks("t1") == []
 
 
+def test_summary_failure_keeps_the_cold_cot_trim_in_the_cache(database):
+    """摘要失败不写 memory block，但越线那一次的冷 CoT 剪裁**留在缓存里不回退**。
+
+    上一条测试的 fixture 没有任何 reasoning 块，所以它盖不住这条路径；这里补上。
+    不回退是刻意的：剪 CoT 不花钱也不丢记忆，回滚只会让下一轮在同一位置重剪一次。
+    """
+
+    with database.session() as session:
+        repo = AgentRepository(session)
+        for index in range(1, 9):
+            repo.add_message(
+                thread_id="t1",
+                user_seq=1,
+                message_type="assistant",
+                content_json={
+                    "type": "ai",
+                    "data": {
+                        "content": [
+                            {"type": "thinking", "thinking": "思" * 300, "signature": "sig"},
+                            {"type": "text", "text": f"turn-{index} " + "x" * 40},
+                        ]
+                    },
+                },
+                langchain_message_id=f"a{index}",
+            )
+
+    settings = ContextSettings(
+        total_tokens=200,
+        working_trigger_ratio=0.5,
+        reasoning_retain_ratio=0.15,
+        recent_tail_ratio=0.2,
+        l0_block_count=2,
+        summary_concurrency=1,
+    )
+
+    def visible_reasoning(engine: ContextEngine) -> int:
+        return sum(
+            1
+            for piece in engine.rebuild("t1")
+            for row in piece.messages or ()
+            for block in (row.content_json.get("data") or {}).get("content") or []
+            if isinstance(block, dict) and block.get("type") == "thinking"
+        )
+
+    engine = ContextEngine(database, settings, RecordingSummarizer(fail=True))
+    assert visible_reasoning(engine) == 8
+
+    with pytest.raises(RuntimeError, match="summary unavailable"):
+        engine.compact_if_needed("t1")
+
+    assert visible_reasoning(engine) == 1  # 最老的那些不回读，只保住最新一段
+    with database.session() as session:
+        assert AgentRepository(session).memory_blocks("t1") == []
+    # 库里仍是原文：缓存失效重载后 8 段全部回来。
+    assert visible_reasoning(ContextEngine(database, settings, RecordingSummarizer())) == 8
+
+
 def test_next_compaction_trims_new_old_results(database):
     rows = persist(database, tool_batch(12))
     settings = compaction_settings([MessageSnapshot.from_model(row) for row in rows])
