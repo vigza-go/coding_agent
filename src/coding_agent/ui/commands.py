@@ -28,6 +28,7 @@ def parse_command(text: str) -> ParsedCommand | None:
     if name == "list":
         name = "history"
     arity = {
+        "clear": (0, 0),
         "exit": (0, 0),
         "help": (0, 0),
         "history": (0, 1),

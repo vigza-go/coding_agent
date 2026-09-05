@@ -50,6 +50,7 @@ TUI 命令：
 | `/status` | 轮次水位、记忆块层级时间线、压缩区与工作区 token 占用 |
 | `/usage [N]` | 近期回复的 API 用量与 prompt 缓存命中率 |
 | `/undo [N]` | 预览并确认后撤销 `user_seq >= N` |
+| `/clear` | 确认后清空当前线程上下文（历史、压缩块、work state；**不改动文件**） |
 | `/help` `/exit` | 帮助 / 退出 |
 
 输入：Enter 发送，Alt+Enter 换行，方向键浏览本次进程内的输入历史。

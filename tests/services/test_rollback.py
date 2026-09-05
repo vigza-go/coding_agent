@@ -201,3 +201,90 @@ def test_rollback_head_skips_already_inactive_sequence(database, tmp_path):
         assert conversation.active_head_seq == 1
         assert repo.latest_active_user_seq("t1") == 1
         assert [row.user_seq for row in repo.active_messages("t1")] == [1]
+
+
+def _seed_turn(database, workspace, *, user_seq, before, after, ids):
+    """造一轮：一条提问、一条回答、一份工作状态、一处文件改动。"""
+
+    target = workspace / "value.txt"
+    target.write_text(before, encoding="utf-8")
+    recorder = FileMutationRecorder(database, workspace)
+    with database.session() as session:
+        repo = AgentRepository(session)
+        repo.add_message(
+            thread_id="t1",
+            user_seq=user_seq,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "change"}},
+            langchain_message_id=f"{ids}-user",
+        )
+        repo.add_message(
+            thread_id="t1",
+            user_seq=user_seq,
+            message_type=MessageType.ASSISTANT,
+            content_json={"type": "ai", "data": {"content": "done"}},
+            langchain_message_id=f"{ids}-ai",
+        )
+        repo.save_work_state("t1", user_seq, {"step": "change"})
+    mutation_id = recorder.begin(
+        thread_id="t1",
+        user_seq=user_seq,
+        tool_call_id=f"{ids}-call",
+        tool_name="write_file",
+        requested_path="/value.txt",
+    )
+    target.write_text(after, encoding="utf-8")
+    recorder.finish(mutation_id, succeeded=True)
+    return recorder, target
+
+
+def test_clear_context_wipes_timeline_but_never_the_worktree(database, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    recorder, target = _seed_turn(
+        database, workspace, user_seq=2, before="original", after="after", ids="clear"
+    )
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    assert engine.current_work_state("t1") is not None  # 先让缓存热起来
+
+    result = RollbackService(database, engine, recorder).clear_context("t1")
+
+    assert result.restored_files == 0
+    assert result.deactivated_messages == 2
+    assert target.read_text(encoding="utf-8") == "after"  # 磁盘上一个字都没动
+    assert engine.current_work_state("t1") is None  # 工作状态也是上下文，一起清
+    with database.session() as session:
+        repo = AgentRepository(session)
+        assert repo.active_messages("t1") == []
+        conversation = repo.get_or_create_conversation("t1")
+        assert conversation.active_head_seq == 0
+        assert conversation.next_user_seq == 1  # 取号器只增不减，clear 不动它
+
+
+def test_after_clear_old_turn_can_still_be_undone_by_seq(database, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    recorder, target = _seed_turn(
+        database, workspace, user_seq=2, before="original", after="old-turn", ids="old"
+    )
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    service = RollbackService(database, engine, recorder)
+    service.clear_context("t1")
+    # 清空之后又走了一轮（只留时间轴，没碰文件）。
+    with database.session() as session:
+        AgentRepository(session).add_message(
+            thread_id="t1",
+            user_seq=3,
+            message_type=MessageType.USER,
+            content_json={"type": "human", "data": {"content": "next"}},
+            langchain_message_id="next-user",
+        )
+
+    fresh = service.rollback("t1", 3)
+    assert fresh.restored_files == 0  # 退新轮不该顺手把 clear 之前的改动也退了
+    assert target.read_text(encoding="utf-8") == "old-turn"
+
+    # 旧账没被 clear 停用，按它自己那一轮仍然退得回去。
+    old = service.rollback("t1", 2)
+    assert old.restored_files == 1
+    assert target.read_text(encoding="utf-8") == "original"

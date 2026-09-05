@@ -35,6 +35,7 @@ HELP = """可用命令：
   /status        查看当前会话状态
   /usage [N]     查询近期 N 条模型回复的 API 用量与缓存命中率
   /undo [SEQ]    预览并撤销 SEQ 及之后的历史
+  /clear         清空当前线程的上下文（历史与工作状态，不改动文件）
   /help          显示帮助
   /exit          退出
 
@@ -227,6 +228,9 @@ class TerminalUI:
                 self.console.print("当前没有可撤销的用户轮次。")
                 return True
             self._confirm_and_rollback(user_seq)
+            return True
+        if command.name == "clear":
+            self._confirm_and_clear()
             return True
         raise CommandParseError(f"未实现命令：/{command.name}")
 
@@ -491,6 +495,30 @@ class TerminalUI:
             f"已撤销 user_seq >= {user_seq}：恢复 {result.restored_files} 个文件变更，"
             f"停用 {result.deactivated_messages} 条消息。"
         )
+
+    def _confirm_and_clear(self) -> None:
+        preview = self.app.rollback_preview(self.thread_id, 1)
+        if not any((preview.messages, preview.work_states)):
+            self.console.print("当前线程没有可清空的上下文。")
+            return
+        table = Table("将被停用", "数量", box=None)
+        table.add_row("消息", str(preview.messages))
+        table.add_row("work state", str(preview.work_states))
+        self.console.print(table)
+        if preview.file_mutations:
+            # 清空的是"模型下次看到什么"，不是"磁盘上有什么"。旧的文件账留在它自己那一轮上，
+            # 想退回仍然可以按那一轮 /undo —— clear 不越这个界。
+            self.console.print(
+                f"[dim]文件改动 {preview.file_mutations} 处（{preview.files} 个文件）"
+                f"保持原样、不退回；要退就用 /undo <那一轮的 seq>。[/dim]"
+            )
+        if Confirm.ask(f"确认清空 thread={self.thread_id} 的上下文吗？", default=False):
+            with self.console.status("[yellow]正在清空…[/yellow]", spinner="dots"):
+                result = self.app.clear_context(self.thread_id)
+            self.console.print(
+                f"已停用 {result.deactivated_messages} 条消息，工作状态一并清空；"
+                "工作树未做任何改动。下一轮从零开始。"
+            )
 
     def _error(self, message: str) -> None:
         self.console.print(Text(f"错误：{message}", style="bold red"))

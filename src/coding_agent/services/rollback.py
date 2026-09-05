@@ -82,11 +82,19 @@ class RollbackService:
         self,
         thread_id: str,
         user_seq: int,
+        *,
+        restore_files: bool = True,
     ) -> RollbackResult:
+        """停用 ``user_seq`` 及之后的时间轴；``restore_files=False`` 时一个字都不碰工作树。
+
+        不还原文件也不停用文件账：那些账留在自己的 ``user_seq`` 上，之后仍可按那轮 ``/undo``
+        退回（``next_user_seq`` 只增不减，clear 之后的新轮次不会跟它们撞号）。
+        """
+
         if user_seq < 1:
             raise ValueError("user_seq must be >= 1")
 
-        restored = self.mutation_recorder.rollback(thread_id, user_seq)
+        restored = self.mutation_recorder.rollback(thread_id, user_seq) if restore_files else 0
         with self.database.session() as session:
             repo = AgentRepository(session)
             conversation = repo.get_or_create_conversation(thread_id, lock=True)
@@ -139,3 +147,12 @@ class RollbackService:
 
         # 应用数据库是 canonical source，文件恢复逐条幂等提交；不存在需要回写的派生快照。
         return RollbackResult(restored, deactivated or 0, tuple(pieces), work_state)
+
+    def clear_context(self, thread_id: str) -> RollbackResult:
+        """清空这个线程喂给模型的一切：历史消息、压缩块、工作状态，工作树原样不动。
+
+        等于 ``rollback(1, restore_files=False)`` —— 复用同一套停用与重投影逻辑，不另发明
+        "重置游标"之类的标记行。撤销的最小单位仍是 DESIGN 定的 ``user_seq``，这里就是 1。
+        """
+
+        return self.rollback(thread_id, 1, restore_files=False)

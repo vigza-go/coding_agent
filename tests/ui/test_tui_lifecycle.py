@@ -15,6 +15,7 @@ from rich.console import Console
 from coding_agent.application import TurnExecutionError
 from coding_agent.config import Settings, TUISettings
 from coding_agent.services.progress import TurnEvent, TurnEventKind
+from coding_agent.services.rollback import RollbackPreview, RollbackResult
 from coding_agent.services.usage import RecentUsage
 from coding_agent.ui import tui
 from coding_agent.ui.commands import CommandParseError, ParsedCommand
@@ -291,3 +292,47 @@ def test_terminal_probe_treats_revoked_terminal_as_gone(monkeypatch):
     monkeypatch.setattr(os, "tcgetpgrp", lambda fd: os.getpgrp())
     monkeypatch.setattr(os, "open", no_ctty)
     assert tui._tty_lost() is True  # 中间态：master 关了、slave 还开着，tcgetpgrp 看不出来
+
+
+def _preview(messages=2, work_states=1, file_mutations=1, files=1):
+    # 用真 dataclass 而不是随手编的假对象：字段名写错时 Mock 会一路放过，真跑才炸。
+    return RollbackPreview(
+        messages=messages,
+        file_mutations=file_mutations,
+        files=files,
+        work_states=work_states,
+    )
+
+
+def test_clear_command_reaches_the_app_only_after_confirmation(monkeypatch):
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.rollback_preview.return_value = _preview()
+    app.clear_context.return_value = RollbackResult(0, 2, (), None)
+    command = ParsedCommand(name="clear")
+
+    monkeypatch.setattr(tui.Confirm, "ask", classmethod(lambda cls, *a, **k: False))
+    ui._handle_command(command)
+    app.clear_context.assert_not_called()
+
+    monkeypatch.setattr(tui.Confirm, "ask", classmethod(lambda cls, *a, **k: True))
+    assert ui._handle_command(command) is True
+    app.clear_context.assert_called_once_with("t1")
+    app.rollback.assert_not_called()  # 清空不是撤销，别顺手把文件退了
+    rendered = output.getvalue()
+    assert "保持原样" in rendered
+    assert "已停用 2 条消息" in rendered
+
+
+def test_clear_command_on_an_empty_thread_does_nothing(monkeypatch):
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.rollback_preview.return_value = _preview(messages=0, work_states=0)
+    asked = []
+    monkeypatch.setattr(
+        tui.Confirm, "ask", classmethod(lambda cls, *a, **k: asked.append(1) or True)
+    )
+
+    ui._handle_command(ParsedCommand(name="clear"))
+
+    assert asked == []
+    assert app.clear_context.call_count == 0
+    assert "没有可清空的上下文" in output.getvalue()

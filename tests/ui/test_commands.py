@@ -37,3 +37,13 @@ def test_usage_command_accepts_optional_recent_count():
     assert explicit is not None and explicit.argument == "50"
     with pytest.raises(CommandParseError):
         parse_command("/usage 50 extra")
+
+
+def test_clear_command_takes_no_argument():
+    clear = parse_command("/clear")
+
+    assert clear is not None
+    assert clear.name == "clear"
+    assert clear.argument is None
+    with pytest.raises(CommandParseError, match="参数数量"):
+        parse_command("/clear everything")

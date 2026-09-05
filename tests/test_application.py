@@ -6,7 +6,7 @@ import threading
 import time
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, RemoveMessage, ToolMessage
 from sqlalchemy import select
 
 from coding_agent.application import AgentApplication, TurnExecutionError
@@ -15,6 +15,7 @@ from coding_agent.context.engine import ContextEngine
 from coding_agent.context.summarizer import DeterministicSummarizer
 from coding_agent.persistence.message_codec import decode_message
 from coding_agent.persistence.models import Message
+from coding_agent.services.context_projection import ContextProjectionService
 from coding_agent.workspace.file_undo import FileMutationRecorder
 
 
@@ -288,3 +289,53 @@ def test_ctrl_c_while_waiting_kills_parent_and_child(database, tmp_path):
     process = jobs._jobs[spawned[0]]["process"]
     process.wait(timeout=10)
     assert process.poll() is not None, "父轮停了，子进程还活着 —— 那它会往作废的回合里写文件"
+
+
+def projected_history(projection, thread_id):
+    """模型下一轮真会看到的对话内容（去掉那条"整段覆盖"的 RemoveMessage 标记）。"""
+
+    return [
+        str(message.content)
+        for message in projection.build(thread_id)
+        if not isinstance(message, RemoveMessage)
+    ]
+
+
+class SilentAgent:
+    """只回一句话、不自己落库的假代理：AI 消息由图的中间件负责，这里没有图。"""
+
+    def __init__(self) -> None:
+        self.prompts: list[list] = []
+
+    def invoke(self, payload, *args, **kwargs):
+        self.prompts.append(list(payload["messages"]))
+        # 图返回的是 state dict，不是单条消息。
+        return {"messages": [AIMessage(id="ai-reply", content="ok")]}
+
+    def update_state(self, *args, **kwargs):
+        del args, kwargs
+
+
+def test_clear_context_leaves_nothing_for_the_model_to_see(database, tmp_path):
+    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    agent = SilentAgent()
+    app = AgentApplication(
+        Settings(workspace_root=tmp_path),
+        database,
+        agent,
+        engine,
+        FileMutationRecorder(database, tmp_path),
+    )
+    projection = ContextProjectionService(engine)
+
+    app.run_turn("t1", "第一句")
+    app.run_turn("t1", "第二句")
+    assert projected_history(projection, "t1") == ["第一句", "第二句"]
+
+    result = app.clear_context("t1")
+    assert result.restored_files == 0
+    # 库和进程内缓存都得空：只翻数据库、缓存还留着旧行，模型照样看得见历史。
+    assert projected_history(projection, "t1") == []
+
+    app.run_turn("t1", "第三句")
+    assert projected_history(projection, "t1") == ["第三句"]

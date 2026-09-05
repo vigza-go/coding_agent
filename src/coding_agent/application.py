@@ -268,6 +268,11 @@ class AgentApplication:
     def rollback_preview(self, thread_id: str, user_seq: int) -> RollbackPreview:
         return self.rollback_service.preview(thread_id, user_seq)
 
+    def clear_context(self, thread_id: str) -> RollbackResult:
+        """清空当前线程的上下文（历史 + 压缩块 + 工作状态），不动工作树里的任何文件。"""
+
+        return self.rollback_service.clear_context(thread_id)
+
     def active_head(self, thread_id: str) -> int:
         with self.database.session() as session:
             return AgentRepository(session).get_or_create_conversation(thread_id).active_head_seq

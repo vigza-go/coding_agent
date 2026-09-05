@@ -250,6 +250,11 @@ TUI 的桌面辅助行为通过 `tui` 配置控制：macOS 仅在 `run_turn` 期
 checkpoint 里的快照既不进入 prompt 也没有读者，却会按「每个图步骤一份全量 messages 快照」无界
 增长，并把 `get_tuple` 拖成秒级（详见 RUNBOOK 的排障条目）。因此撤销只改数据库，无派生快照需要对齐。
 
+清空上下文（`/clear`）定义为 `rollback(thread_id, 1)` **去掉第 1 步**：历史消息、压缩块、work state
+全部停用，工作树一个字都不动。`file_mutations` 既不恢复也**不停用**，留在自己那一轮上，之后仍可
+`/undo <那一轮>` 退回；`next_user_seq` 同样不回退，所以清空后的新轮次不会跟旧账撞号。要退文件是
+`/undo` 的职责，两者不互相越界。
+
 ## 文件 mutation
 
 `write_file`、`edit_file`、`delete` 在执行前保存文件原始 bytes 到 SHA-256 去重 blob，记录 pending
