@@ -26,7 +26,7 @@ def resolve_workspace_path(workspace_root: Path, requested: str) -> Path:
         if resolved_absolute == root or root in resolved_absolute.parents:
             resolved = resolved_absolute
         else:
-            # FilesystemBackend virtual paths use /foo to mean <root>/foo.
+            # FilesystemBackend 的虚拟路径里，/foo 指的是 <root>/foo。
             resolved = (root / requested.lstrip("/")).resolve()
     else:
         resolved = (root / candidate).resolve()
@@ -90,7 +90,7 @@ class FileMutationRecorder:
         user_seq: int,
         tool_call: ToolCall,
     ) -> Generator[int | None, None, None]:
-        """Hold a per-file lock across snapshot, execution/retries and finalization."""
+        """从快照、执行/重试到收尾，全程持有这条文件的锁。"""
 
         tool_name = str(tool_call.get("name", ""))
         if tool_name not in self.MUTATING_TOOLS:

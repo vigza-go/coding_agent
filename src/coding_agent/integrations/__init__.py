@@ -1,1 +1,1 @@
-"""LangChain and LangGraph integration adapters."""
+"""LangChain / LangGraph 集成适配。"""

@@ -51,7 +51,7 @@ class ThreadContextState:
 
 
 class ThreadContextCache:
-    """Process-local derived context. The application database remains canonical."""
+    """进程内的派生上下文。权威数据仍以应用的数据库为准。"""
 
     def __init__(self, database: Database) -> None:
         self.database = database

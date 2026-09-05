@@ -9,24 +9,25 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..services.progress import ProgressCallbackHandler
 from .tokens import estimate_tokens
 
-# Wire/protocol-shaped leftovers that a summary must never contain. The compressor
-# used to confuse "compress this transcript" with "keep doing the work": it produced
-# fake <tool_call>/<function>/<parameter> blocks and first-person continuations that
-# then got injected back into every future turn. We reject such output outright.
+# 摘要里绝不能出现的线协议残骸。压缩器以前把“压缩这段转录”理解成“接着把活干完”：它会
+# 造出假的工具调用标签块和第一人称续写，然后这些东西被塞回之后的每一轮。这样的输出一律
+# 拒收。
 _PROTOCOL_PATTERN = re.compile(
     r"<[^>]{0,60}(?:tool_call|tool_use|function|parameter|invoke)[^>]{0,60}>"
     r"|(?:</?)\s*(?:tool_call|tool_use|function|parameter|invoke)\b"
     r"|\"(?:tool_calls|raw_arguments|arguments)\"\s*:"
 )
-# Pure markup/JSON dumps (e.g. an entire summary that is just a tool-call skeleton).
+# 纯标记 / JSON 的堆料（比如整份摘要就是一个工具调用骨架）。
 _SHELL_PATTERN = re.compile(r"^\s*<tool_call|^\s*<function=")
 
 SummaryValidator = Callable[[str], str | None]
 
 
 def first_summary_issue(output: str) -> str | None:
-    """Return a reason string when a summary looks like task-execution instead of
-    a digest, otherwise ``None``. Used as the content gate on summarizer output."""
+    """摘要看着像在“接着干活”而不是“做摘要”时就返回原因，否则返回 ``None``。
+
+    用作摘要输出上的内容门禁。
+    """
     if not output.strip():
         return "输出为空"
     if _SHELL_PATTERN.search(output) or _PROTOCOL_PATTERN.search(output):
@@ -74,13 +75,11 @@ class RetryingSummarizer:
         self.validate = validate
 
     def summarize(self, text: str, *, hard_limit: int, level: int, attempt: int = 1) -> str:
-        """Best-effort digest bounded by ``hard_limit``.
+        """尽力做一份摘要，长度以 ``hard_limit`` 为目标。
 
-        ``hard_limit`` is a soft target, not a hard contract: a compression summary
-        that slightly overshoots still shrinks memory, so after the retries we accept
-        the shortest content-clean output instead of failing the caller (which, in the
-        hot path, would take down the whole user turn). We only raise when every
-        attempt came back empty or with protocol-garbage content.
+        ``hard_limit`` 是软目标，不是硬合同：稍微超一点的摘要仍然在缩小记忆，所以重试
+        用完之后，我们接受“内容干净但最短”的那一版，而不是把调用方打挂——它坐在热路径上，
+        抛异常会连带整轮用户请求一起失败。只有每次尝试都返回空、或者带着协议残骸，才抛异常。
         """
         del attempt
         best: str | None = None
@@ -118,11 +117,11 @@ class RetryingSummarizer:
 
 
 class LangChainSummarizer:
-    """Compress a transcript with an LLM, keeping the role boundary explicit.
+    """用 LLM 压缩一份转录，并把角色边界划清楚。
 
-    The system prompt deliberately forbids the failure modes observed in production:
-    responding to / continuing the transcript, writing in first person, and echoing
-    tool calls, XML, JSON or code verbatim."""
+    系统提示词里有意禁死生产环境见过的几种翻车：把转录当成在跟自己对话接着回、用第一人称
+    写、以及把工具调用 / XML / JSON / 代码原样抄出来。
+    """
 
     def __init__(
         self, model: object, token_counter: Callable[[str], int] = estimate_tokens
@@ -173,7 +172,7 @@ class LangChainSummarizer:
 
 
 class DeterministicSummarizer:
-    """Offline/test fallback; not intended for production semantic compression."""
+    """离线/测试用的兜底实现，不用于生产的语义压缩。"""
 
     def summarize(
         self,

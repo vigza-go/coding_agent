@@ -136,18 +136,17 @@ class TUISettings:
 
 @dataclass(frozen=True)
 class SummaryLLMSettings:
-    """Dedicated model used for context compression/summarization.
+    """专门用来做上下文压缩/摘要的模型。
 
-    Kept separate from the main agent LLM because compression should be fast, cheap
-    and deterministic: extended thinking only burns budget and delays the turn. Leave
-    ``model`` empty to reuse the main LLM; ``thinking`` is ``"disabled"`` by default.
+    跟主 Agent 的模型分开，是因为压缩要快、要便宜、要稳：extended thinking 只会烧预算、
+    拖慢本轮。``model`` 留空就复用主模型；``thinking`` 默认是 ``"disabled"``。
     """
 
     model: str = ""
     api_key: str = ""
     base_url: str = ""
     max_output_tokens: int = 0
-    thinking: str = "disabled"  # "disabled" | "auto"
+    thinking: str = "disabled"  # 取值："disabled" | "auto"
 
     def __post_init__(self) -> None:
         if self.thinking not in ("disabled", "auto"):

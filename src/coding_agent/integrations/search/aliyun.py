@@ -36,7 +36,7 @@ SearchCall = Callable[..., Any]
 
 
 class AliSearchClient:
-    """Issue one forced-search generation call and return answer + sources."""
+    """发起一次强制联网检索的生成调用，返回答案 + 来源。"""
 
     def __init__(
         self,

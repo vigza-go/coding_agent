@@ -30,12 +30,11 @@ class TurnEvent:
 
 
 def _mid_turn_text(response: Any) -> str | None:
-    """Pull the model's own prose out of a finished call, but only when it kept working.
+    """把模型自己写的正文捞出来，但只在它“还在接着干活”的时候。
 
-    Only messages that go on to issue tool calls are reported. `run_turn` hands the
-    final answer back separately (last AI message without tool calls) and the TUI
-    renders it as its own panel, so reporting it here would print it twice. The same
-    gate keeps the compaction summarizer's plain-text replies out of the transcript.
+    只有后面还会发起工具调用的消息才上报。`run_turn` 会单独把最终答案交回去（最后一条
+    不带工具调用的 AI 消息），TUI 把它渲染成自己的面板，所以这里再报一遍就会印两次。
+    同一道闸门也顺手把压缩摘要器的纯文本回复挡在对话记录外面。
     """
     parts: list[str] = []
     for generation_list in getattr(response, "generations", None) or []:
@@ -50,7 +49,7 @@ def _mid_turn_text(response: Any) -> str | None:
 
 
 class TurnEventGate:
-    """Drop callbacks after a turn ends and drain any event already being rendered."""
+    """一轮结束后就把回调丢掉，正在渲染的那个事件让它排空。"""
 
     def __init__(self, emit: Callable[[TurnEvent], None]) -> None:
         self._emit = emit

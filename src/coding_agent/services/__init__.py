@@ -1,1 +1,1 @@
-"""Cross-domain application services."""
+"""跨领域的应用服务。"""

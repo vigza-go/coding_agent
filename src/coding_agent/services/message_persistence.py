@@ -75,7 +75,7 @@ class MessagePersistenceService:
         return replace(command, update={**command.update, "messages": normalized_messages})
 
     def close_incomplete_tool_batch(self, *, thread_id: str, user_seq: int) -> int:
-        """Close a trailing partial tool batch so provider protocol remains valid."""
+        """把结尾那半截工具批次补齐，让 provider 的协议仍然合法。"""
 
         with self.database.session() as session:
             rows = [

@@ -19,7 +19,7 @@ end run"""
 
 
 class DesktopService:
-    """Best-effort macOS helpers; never change persistent power/notification settings."""
+    """尽力而为的 macOS 辅助能力；绝不改动系统持久的电源/通知设置。"""
 
     def __init__(self, settings: TUISettings, warn: Callable[[str], None]) -> None:
         self.settings = settings
@@ -79,7 +79,7 @@ class DesktopService:
         if sound:
             arguments.append(sound)
         try:
-            # User text is an argument, never interpolated into AppleScript or a shell.
+            # 用户输入只当参数传进去，绝不拼进 AppleScript 或 shell。
             subprocess.run(
                 arguments,
                 stdin=subprocess.DEVNULL,

@@ -9,7 +9,7 @@ from rich.theme import Theme
 
 TUI_THEME = Theme(
     {
-        # Rich defaults to "bold cyan on black", which clashes with light terminals.
+        # Rich 默认用“黑底亮青”，在浅色终端里很刺眼。
         "markdown.code": "bold blue",
         "markdown.code_block": "none",
     }
@@ -17,13 +17,12 @@ TUI_THEME = Theme(
 
 
 class LiteralMarkdown(Markdown):
-    """Markdown that keeps literal HTML-like text instead of silently dropping it.
+    """字面量 HTML 样文本照样看得见的 Markdown，不会被悄悄扔掉。
 
-    Rich's default renderer discards raw HTML (html_inline / html_block tokens),
-    so agent prose such as ``<w></w>`` or ``</parameter>`` disappeared from the TUI
-    while the full text was still stored in the database. Disabling markdown-it's
-    HTML rules makes those sequences render verbatim as ordinary text (markdown
-    headings, bold, code spans and fenced code keep working as before).
+    Rich 默认的渲染器会把原始 HTML 直接丢掉（html_inline / html_block 两种 token），于是
+    Agent 写的标签样正文（尖括号那类）在 TUI 里消失了，而库里明明存着完整文本。关掉
+    markdown-it 的 HTML 规则之后，这些串按普通文本原样渲染（标题、加粗、行内代码、围栏
+    代码块都照旧）。
     """
 
     def __init__(
@@ -36,8 +35,8 @@ class LiteralMarkdown(Markdown):
         inline_code_lexer: str | None = None,
         inline_code_theme: str | None = None,
     ) -> None:
-        # Mirror rich.markdown.Markdown.__init__, but disable the HTML rules so that
-        # tags are parsed as text rather than dropped during rendering.
+        # 照搬 rich.markdown.Markdown.__init__，但关掉 HTML 规则：标签按文本解析，
+        # 而不是在渲染时被丢掉。
         parser = (
             MarkdownIt()
             .disable("html_block")

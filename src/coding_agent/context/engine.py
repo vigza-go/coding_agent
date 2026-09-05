@@ -55,7 +55,7 @@ class ContextEngine:
         self.cache = ThreadContextCache(database)
 
     def append_messages(self, thread_id: str, rows: Sequence[Message]) -> None:
-        """Append rows only after their database transaction has committed."""
+        """等数据库事务真的提交了，才把这些行追加进来。"""
 
         try:
             self.cache.append_messages(thread_id, rows)
@@ -64,7 +64,7 @@ class ContextEngine:
             raise
 
     def update_work_state(self, thread_id: str, row: WorkStateSnapshot) -> None:
-        """Update the derived work-state view after the canonical row commits."""
+        """权威行提交后，更新派生的工作状态视图。"""
 
         try:
             self.cache.update_work_state(thread_id, row)
@@ -108,7 +108,7 @@ class ContextEngine:
         self.cache.invalidate(thread_id)
 
     def usage(self, thread_id: str) -> ContextUsage:
-        """Return a read-only snapshot of the context currently selected for a thread."""
+        """返回某个线程当前所选上下文的只读快照。"""
 
         with self.cache.locked(thread_id) as state:
             return ContextUsage(
@@ -126,13 +126,12 @@ class ContextEngine:
 
     @staticmethod
     def _strip_reasoning(message: MessageSnapshot) -> MessageSnapshot | None:
-        """Rebuild ``message`` without its chain-of-thought blocks, or None if it has none.
+        """重建 ``message``，去掉它的思维链块；本来就没有就返回 None。
 
-        Only reasoning blocks are touched, so ``tool_use`` blocks and their
-        ``tool_result`` partners survive byte-for-byte by construction. A single plain
-        marker replaces the first removed block so the model can tell that reasoning was
-        withheld rather than never happening -- absence that looks like absence is the
-        failure mode that lets a rejected idea come back as a fresh one.
+        只动 reasoning 块，所以 ``tool_use`` 块和与它配对的 ``tool_result`` 在构造上保证
+        逐字节不变。第一个被删掉的块会留下一个纯文本标记，让模型知道“思考是被收起来的”，
+        而不是“压根没想过”——看不见的缺失才是最坏的失效模式：一个已经被否掉的主意，会当成
+        新想法重新冒出来。
         """
 
         trailer = "[较早的模型思维链已剪裁，不再回读。]"
@@ -164,12 +163,11 @@ class ContextEngine:
     def _retain_reasoning_within_budget(
         cls, messages: list[MessageSnapshot], budget: int
     ) -> list[MessageSnapshot]:
-        """Drop the coldest chain-of-thought first, newest-first, until ``budget`` tokens remain.
+        """从最冷的思维链开始丢，一路丢到只剩 ``budget`` 个 token。
 
-        The saving of each message is measured with the very estimator the trigger uses, on
-        the projected result, so a message that costs nothing to trim is never charged for
-        it. The newest reasoning segment is kept even when it alone exceeds ``budget``: a
-        turn must never lose the thought that produced the call it is about to make.
+        每条消息能省多少，用的是触发线那同一把尺子、在同一份投影结果上量的，所以一条“剪了
+        也不省”的消息不会被记上一笔。最新那段思考一定保留，哪怕它自己就超了 ``budget``：
+        一轮对话不能丢掉“即将发出的这次调用是怎么想出来的”。
         """
 
         stripped = [cls._strip_reasoning(message) for message in messages]
@@ -224,18 +222,16 @@ class ContextEngine:
         if working_tokens <= self.settings.working_trigger:
             return 0
 
-        # At the wall, shed cold chain-of-thought before reaching for the summarizer: it is
-        # the only reduction available here that costs no API call and destroys no memory
-        # block. Running it only at the wall -- rather than every turn -- is what keeps the
-        # cached prefix alive, because cache cost is set by how early a change sits in the
-        # prompt, not by how large the change is. See ContextSettings.reasoning_budget.
+        # 撑到线上时先剪冷思维链，再动摘要器：这是此处唯一不花 API 调用、也不丢记忆块的缩减
+        # 手段。只在撑到时才剪、而不是每轮都剪，缓存前缀才活得下来——缓存的代价取决于改动落在
+        # 提示词多靠前的位置，而不是改动有多大。见 ContextSettings.reasoning_budget。
         working = self._retain_reasoning_within_budget(working, self.settings.reasoning_budget)
         state.working_messages = working
         working_tokens = sum(message_tokens(message) for message in working)
         if working_tokens <= self.settings.working_trigger:
             return 0
 
-        # Once triggered, trim exactly once and then partition the resulting messages.
+        # 一旦触发就只剪这一次，然后对剪完的消息做分区。
         working = self._trim_old_tool_results(working, self.settings.recent_tool_interactions)
         working_tokens = sum(message_tokens(message) for message in working)
         units = atomic_message_units(working)
@@ -296,6 +292,11 @@ class ContextEngine:
         self, chunk: list[MessageSnapshot]
     ) -> tuple[list[MessageSnapshot], str, int]:
         source = sanitize_transcript(chunk)
+        # 配额的分母是"这一段历史在模型上下文里占多少"，也就是触发线、尾留、切块用的那把
+        # 尺子（`message_tokens` 现在量的是可见内容，不是 JSON 包壳）。两条口径都不对：
+        # 按 JSON 包壳算会把上限抬到比原文还长（等于没约束），按下面这份 source 算又只到
+        # 真实的一半多 —— source 是喂给弱摘要器的安全副本，思考块与工具调用原文都被它抹掉了。
+        # 合并路径本来就按左右两块入库文本的 token 算，两条路径同为「压缩掉多少、给一半名额」。
         source_tokens = sum(message_tokens(message) for message in chunk)
         hard_limit = max(1, math.floor(source_tokens * self.settings.summary_target_ratio))
         summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=0)

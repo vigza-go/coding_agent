@@ -10,7 +10,7 @@ from langgraph.types import Command
 
 
 class ToolExecutionService:
-    """Execute one logical tool call, with policy-controlled retries."""
+    """执行一次逻辑上的工具调用，重不重试由策略说了算。"""
 
     def __init__(self, *, max_retries: int, retryable_tools: Collection[str]) -> None:
         if max_retries < 0:

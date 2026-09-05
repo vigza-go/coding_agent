@@ -43,7 +43,7 @@ class RecentUsage:
             cached = _count(details.get("cache_read")) if isinstance(details, dict) else None
             if cached is None or cached > inputs:
                 continue
-            # LangChain input_tokens already includes cache reads and cache creation.
+            # LangChain 的 input_tokens 已经把缓存读取和缓存创建算在里面了。
             cache_samples += 1
             cache_input_tokens += inputs
             cache_read_tokens += cached

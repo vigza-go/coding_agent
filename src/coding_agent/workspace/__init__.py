@@ -1,1 +1,1 @@
-"""Workspace artifacts and reversible file mutations."""
+"""工作区产物与可撤销的文件改动。"""

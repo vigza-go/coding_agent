@@ -101,7 +101,7 @@ class AgentRepository:
     def recent_usage_metadata(self, thread_id: str, *, limit: int) -> list[Any]:
         if limit < 1:
             raise ValueError("usage limit must be positive")
-        # Include inactive history: undo does not refund API usage. Do not load message bodies.
+        # 连已停用的历史一起算：撤销不退 API 花费。但不用把消息正文读进来。
         return list(
             self.session.scalars(
                 select(Message.content_json["data"]["usage_metadata"])
@@ -173,7 +173,7 @@ class AgentRepository:
         values = {"sha256": sha256, "content": content, "storage_uri": storage_uri}
         dialect = self.session.get_bind().dialect.name
         if dialect in {"mysql", "mariadb"}:
-            # A duplicate is normal: reuse the immutable blob without overwriting it.
+            # 撞重复是正常路径：直接复用那份不可变的 blob，不去覆盖它。
             statement = (
                 mysql_insert(FileBlob).values(**values).on_duplicate_key_update(id=FileBlob.id)
             )
@@ -186,7 +186,7 @@ class AgentRepository:
         else:
             raise NotImplementedError(f"atomic blob insertion is not supported for {dialect}")
         self.session.execute(statement)
-        # Use a current read, even if MySQL REPEATABLE READ already has an older snapshot.
+        # 用当前读，哪怕 MySQL 的 REPEATABLE READ 快照里已经是旧行。
         return self.session.scalars(
             select(FileBlob).where(FileBlob.sha256 == sha256).with_for_update()
         ).one()

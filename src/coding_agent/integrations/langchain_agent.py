@@ -43,12 +43,11 @@ def build_model(settings: Settings) -> ChatAnthropic:
 
 
 def build_summary_model(settings: Settings) -> ChatAnthropic:
-    """A dedicated, cheap, deterministic model for context compression.
+    """给上下文压缩单开一个便宜、稳定的模型。
 
-    Summarization must not burn latency or tokens on extended thinking, so by default
-    ``thinking={"type": "disabled"}`` is requested for the summary model (use
-    ``summary_llm.thinking="auto"`` in config to keep the provider default instead).
-    Falls back to the main agent LLM when ``summary_llm.model`` is empty.
+    摘要不该把延迟和 token 花在 extended thinking 上，所以默认给摘要模型请求
+    ``thinking={"type": "disabled"}``（想保留 provider 的默认行为，就在配置里写
+    ``summary_llm.thinking="auto"``）。``summary_llm.model`` 留空时退回主 Agent 模型。
     """
     summary = settings.summary_llm
     llm = settings.llm

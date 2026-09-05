@@ -294,11 +294,10 @@ class TerminalUI:
             self.console.bell()
 
     def _print_agent_text(self, content: object) -> None:
-        """Render one block of model prose as an Agent panel.
+        """把一段模型正文渲染成 Agent 面板。
 
-        Shared by mid-turn prose and the final answer. Previously only the final answer
-        had a path to the console, so every explanation the model wrote alongside a tool
-        call was silently dropped and the user saw just the last message of the turn.
+        轮中散文和最终答案共用这条路。以前只有最终答案有出口到控制台，所以模型在工具
+        调用旁边写的每一条解释都被静默丢掉，用户只看到这一轮的最后那句话。
         """
 
         self.console.print(

@@ -6,11 +6,10 @@ from typing import Any
 
 
 def estimate_tokens(value: Any) -> int:
-    """Cheap deterministic fallback suitable for budgeting and tests.
+    """便宜、确定性的兜底估算，预算和测试用它就够。
 
-    CJK characters are commonly close to one token; ASCII prose/code is roughly four
-    characters per token. Over-counting is intentional because budget overflow is worse
-    than compacting slightly early.
+    中文字符一般接近 1 token；英文正文和代码大约 4 个字符 1 token。宁可往高了估——
+    预算撑爆的代价，比稍微提前一点压缩大得多。
     """
 
     if not isinstance(value, str):

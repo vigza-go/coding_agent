@@ -27,7 +27,7 @@ class RunContext:
 
 
 class AgentRuntimeMiddleware(AgentMiddleware[Any, RunContext, Any]):
-    """Orchestrate one model/tool lifecycle using explicit internal service order."""
+    """按显式的内部服务顺序，编排一轮模型/工具调用的生命周期。"""
 
     def __init__(
         self,

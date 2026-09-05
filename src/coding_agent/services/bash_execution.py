@@ -12,9 +12,8 @@ from threading import Condition, Thread
 from time import monotonic
 from typing import cast
 
-# How long to wait for the output reader to hit a real EOF after the command exits.
-# A backgrounded process can keep the pipe's write end open indefinitely, so this is
-# a bound on patience, not a guess about command duration.
+# 命令退出之后，输出读取线程最多再等多久去等到真正的 EOF。后台进程可以把管道的写端一直
+# 挂着，所以这里限的是耐心，不是对命令时长的猜测。
 _OUTPUT_GRACE_SECONDS = 5.0
 
 
@@ -29,7 +28,7 @@ class BashResult:
 
 
 class BashExecutionService:
-    """Run one non-interactive Bash command with bounded captured output."""
+    """跑一条非交互式 Bash 命令，捕获的输出有上限。"""
 
     def __init__(
         self,
@@ -113,16 +112,14 @@ class BashExecutionService:
         def drain_output() -> None:
             nonlocal truncated
             assert process.stdout is not None
-            # Popen.stdout is annotated as IO[bytes], which has no read1(); with
-            # stdout=PIPE the runtime object really is a BufferedReader, the only stream
-            # type that offers a partial read. Restate it here instead of loosening the
-            # read loop with a blanket ignore.
+            # Popen.stdout 的类型标成 IO[bytes]，上面没有 read1()；而 stdout=PIPE 时运行时
+            # 对象其实就是 BufferedReader，是唯一支持“读多少算多少”的流。在这里改述类型，
+            # 比用一刷子 ignore 把整个读循环放松干净。
             stream = cast("BufferedReader", process.stdout)
             try:
-                # read1() returns whatever has already arrived after a single raw read.
-                # BufferedReader.read(n) instead blocks until it has n bytes or hits EOF,
-                # which would strand already-produced output inside the buffer whenever a
-                # backgrounded process keeps the pipe's write end open forever.
+                # read1() 一次裸读，已经到手的就返回。BufferedReader.read(n) 则会一直堵到攒
+                # 够 n 字节或 EOF——一旦有后台进程把管道写端永远挂着，已经产出的输出就会被
+                # 困在缓冲区里出不来。
                 while chunk := stream.read1(8192):
                     remaining = self.max_output_bytes - len(captured)
                     if remaining > 0:
@@ -130,8 +127,8 @@ class BashExecutionService:
                     if len(chunk) > remaining:
                         truncated = True
             finally:
-                # This thread is the only reader, so it also owns closing the pipe.
-                # Closing it from the caller would deadlock: BufferedReader.close() needs
+                # 这个线程是唯一的读者，所以关管道也归它管。让调用方来关会死锁：
+                # BufferedReader.close() 得先把缓冲区读完。
                 with suppress(OSError):
                     stream.close()
 
@@ -146,14 +143,13 @@ class BashExecutionService:
             process.wait()
             exit_code = 124
         finally:
-            # The command already returned, so read() can only still be blocked because
-            # some process we deliberately left running inherited the pipe's write end.
-            # Wait a bounded moment, then stop waiting: the daemon thread exits by itself
-            # once every writer is gone, and it closes the fd on the way out.
+            # 命令都已经返回了，read() 还能堵着，只可能是我们有意留下的某个后台进程继承了
+            # 管道写端。等有界的一会儿就不再等：守护线程在所有写者消失后自己退出，退出时
+            # 顺手关掉 fd。
             reader.join(timeout=_OUTPUT_GRACE_SECONDS)
             if reader.is_alive():
-                # Later output belongs to a live background process. Surface it through
-                # the existing flag instead of hanging this tool call forever.
+                # 后面再冒出来的输出属于还活着的后台进程。用已有的标记把它露出来，
+                # 而不是把这次工具调用永远挂在这儿。
                 truncated = True
             with self._process_condition:
                 interrupted = process.pid in self._interrupted_processes

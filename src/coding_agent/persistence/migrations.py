@@ -8,10 +8,9 @@ LEGACY_FRONTIER_INDEX = "ix_memory_thread_frontier"
 
 
 def remove_legacy_memory_frontier(engine: Engine) -> bool:
-    """Remove the former materialized frontier cache if it exists.
+    """删掉早先那套物化的 frontier 缓存表（如果还在的话）。
 
-    The migration is intentionally idempotent so existing databases can be upgraded
-    during startup while fresh schemas remain unchanged.
+    这个迁移有意写成幂等的：老库可以在启动时顺手升级，新库的 schema 不受影响。
     """
 
     inspector = inspect(engine)
