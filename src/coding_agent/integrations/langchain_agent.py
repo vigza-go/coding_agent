@@ -119,7 +119,12 @@ def shared_filesystem_middleware(settings: Settings) -> FilesystemMiddleware:
     return FilesystemMiddleware(
         backend=FilesystemBackend(
             root_dir=settings.workspace_root,
-            virtual_mode=True,
+            # 关掉虚拟路径：开启时以 "/" 开头的路径会被当成"虚拟绝对路径"（剥掉前导斜杠
+            # 再拼到 root_dir 下），于是传宿主机真实绝对路径会被静默写到
+            # root_dir/<原路径> 这种嵌套目录里——实机踩过一次（写到了 ~/Users/apple/...）。
+            # 关闭后绝对路径按真实路径解释、相对路径仍基于 root_dir，与 bash 的路径语义一致。
+            # 代价是失去 root_dir 沙箱；本地个人使用、且 bash 本就全权在，沙箱没有意义。
+            virtual_mode=False,
             max_file_size_mb=settings.agent.filesystem_max_file_size_mb,
         )
     )
@@ -148,8 +153,8 @@ def shared_agent_tools(
             raise RuntimeError("bash is enabled but no BashExecutionService was provided")
         tools.append(make_bash_tool(bash_executor))
         bash_prompt = (
-            "\n\nBash 从工作区根目录运行；相对路径基于该目录，绝对路径表示宿主机真实路径，不是"
-            "文件工具的虚拟路径。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "
+            "\n\nBash 从工作区根目录运行；相对路径基于该目录，绝对路径表示宿主机真实路径，"
+            "文件工具同一套规则。Bash 非交互、不会自动重试，且它造成的文件变化无法通过 "
             "/undo 恢复。不要把存在读写依赖的 Bash 和文件操作放进同一批工具调用。"
         )
     if settings.agent.search_enabled:
@@ -267,12 +272,12 @@ def create_langchain_agent(
         middleware=middleware,
         context_schema=RunContext,
         system_prompt=(
-            "你是编码代理。合理使用文件与工作状态工具，保持回答简洁，不要过度设计。"
+            "你是编码代理。合理使用文件与工作状态工具，不要过度设计。如无必要，勿增实体。保持回答简洁，不要把简单的事情复杂化。"
             """
               请用通俗的语言表达，不要过度使用术语，
               注意模仿用户的表达风格。
             """
-            "所有文件工具路径使用以 / 开头、相对于工作区根目录的虚拟路径。"
+            "文件工具路径与 bash 同规则：以 / 开头表示宿主机真实绝对路径，相对路径基于工作区根目录。"
             f"{bash_prompt}"
         ),
     )

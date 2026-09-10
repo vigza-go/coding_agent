@@ -26,7 +26,8 @@ def resolve_workspace_path(workspace_root: Path, requested: str) -> Path:
         if resolved_absolute == root or root in resolved_absolute.parents:
             resolved = resolved_absolute
         else:
-            # FilesystemBackend 的虚拟路径里，/foo 指的是 <root>/foo。
+            # 兜底：绝对路径落在 root 之外时，按 <root>/<去掉前导斜杠> 落到 root 下。
+            # 文件工具现已关掉虚拟模式、传的是真实路径或相对路径，正常不会走到这里。
             resolved = (root / requested.lstrip("/")).resolve()
     else:
         resolved = (root / candidate).resolve()

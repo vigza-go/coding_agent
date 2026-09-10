@@ -28,7 +28,7 @@ def make_bash_tool(executor: BashExecutionService) -> BaseTool:
         """Execute a non-interactive Bash command from the workspace root.
 
         Relative paths such as `src/app.py` resolve from the workspace root. Absolute
-        paths are real host paths, not filesystem-tool virtual paths. Commands cannot
+        paths are real host paths, same as the file tools. Commands cannot
         read stdin, are never retried, and file changes made here cannot be undone by
         /undo. Do not batch this tool with file operations that depend on its effects.
         """

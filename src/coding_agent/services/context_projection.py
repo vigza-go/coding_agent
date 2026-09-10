@@ -44,7 +44,6 @@ class ContextProjectionService:
         snapshot = self.context_engine.current_work_state(thread_id)
         state_messages: list[BaseMessage] = []
         if snapshot is not None:
-            snapshot.state_json["!user_note"] = "如无必要，勿增实体。不要把简单的事情复杂化。"
             body = (
                 render_index(snapshot.state_json)
                 if self._sent_state_id.get(thread_id) == snapshot.id
@@ -60,4 +59,4 @@ class ContextProjectionService:
                     content=f"<current_work_state>\n{body}\n</current_work_state>",
                 )
             )
-        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *state_messages, *projected]
+        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *projected, *state_messages]
