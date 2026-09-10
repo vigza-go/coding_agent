@@ -97,6 +97,26 @@ class WorkStateSnapshot(Base):
     )
 
 
+class TodoSnapshot(Base):
+    """计划的不可变快照：每次写落一条新行，读-改-写整体在 engine 的 thread 锁里。
+
+    与 ``work_state_snapshots`` 同构，只是载荷换成**有序**数组
+    ``[{"id": ..., "title": ..., "status": ...}]``（顺序有语义，渲染不排序）。
+    """
+
+    __tablename__ = "todo_snapshots"
+    __table_args__ = (Index("ix_todo_thread_active", "thread_id", "active", "id"),)
+
+    id: Mapped[int] = mapped_column(SQL_ID, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(191), nullable=False)
+    user_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    items_json: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class MemoryBlock(Base):
     __tablename__ = "memory_blocks"
     __table_args__ = (

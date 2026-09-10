@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, cast
 
-from ..persistence.models import MemoryBlock, Message, WorkStateSnapshot
+from ..persistence.models import MemoryBlock, Message, TodoSnapshot, WorkStateSnapshot
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,21 @@ class MemoryBlockSnapshot:
             end_message_id=cast(int, row.end_message_id),
             level=cast(int, row.level),
             token_count=cast(int, row.token_count),
+        )
+
+
+@dataclass(frozen=True)
+class TodoView:
+    """计划的最新有效版本（有序数组）。"""
+
+    id: int
+    items: list[dict[str, Any]]
+
+    @classmethod
+    def from_model(cls, row: TodoSnapshot) -> TodoView:
+        return cls(
+            id=cast(int, row.id),
+            items=deepcopy(cast(list[dict[str, Any]], row.items_json)),
         )
 
 

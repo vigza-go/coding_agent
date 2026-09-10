@@ -269,3 +269,69 @@ def test_pin_is_not_refreshed_when_the_pass_changed_nothing(database):
 
     engine.mutate_work_state("t1", 2, "set", "goal", "第二版")
     assert "第一版" in pin_text(projection.build("t1")), "白过一遍不得动便签"
+
+
+# --------------------------------------------------------------------- 便签：计划 + 工作状态
+
+
+PLAN = [
+    {"id": "1", "title": "读 DESIGN.md", "status": "completed"},
+    {"id": "2", "title": "写 todo.py", "status": "in_progress"},
+    {"id": "3", "title": "补测试", "status": "pending"},
+]
+
+
+def save_todos(database, thread_id: str, user_seq: int, items: list[dict]) -> int:
+    with database.session() as session:
+        saved = AgentRepository(session).save_todos(thread_id, user_seq, items)
+    return int(saved.id)
+
+
+def test_pin_puts_the_plan_before_the_work_state(database):
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"goal": "把计划机制做出来"})
+    save_todos(database, "t1", 1, PLAN)
+
+    text = pin_text(ContextProjectionService(make_engine(database, **COMPACT)).build("t1"))
+
+    assert "- [~] 2 写 todo.py" in text and "- [ ] 3 补测试" in text, "勾选清单要看得懂"
+    assert text.index("写 todo.py") < text.index("把计划机制做出来"), "计划在前，细节在后"
+
+
+def test_a_thread_with_only_a_plan_still_gets_a_pin(database):
+    """工具消息会被工具窗口换成占位符，计划必须由便签接住——哪怕没有 work_state。"""
+
+    add_messages(database, "t1", 30)
+    save_todos(database, "t1", 1, PLAN)
+
+    text = pin_text(ContextProjectionService(make_engine(database, **COMPACT)).build("t1"))
+
+    assert "补测试" in text
+    assert "# 工作状态" not in text, "没有工作状态就别留一个空段"
+
+
+def test_no_pin_at_all_when_there_is_neither_plan_nor_state(database):
+    add_messages(database, "t1", 30)
+
+    messages = ContextProjectionService(make_engine(database, **COMPACT)).build("t1")
+
+    assert pin_text(messages) == "", "两样都空就不贴空标签"
+
+
+def test_the_plan_reaches_the_pin_at_the_next_trim_and_survives_a_cold_start(database):
+    """写完不算数（模型在尾部工具消息里看新的），剪裁那一下才换；重启后自己长回来。"""
+
+    add_messages(database, "t1", 30)
+    save_todos(database, "t1", 1, [{"id": "1", "title": "第一版", "status": "in_progress"}])
+    engine = make_engine(database, **COMPACT)
+    projection = ContextProjectionService(engine)
+    assert "第一版" in pin_text(projection.build("t1"))
+
+    engine.mutate_todos("t1", 2, [{"id": "1", "title": "第二版", "status": "in_progress"}])
+    assert "第一版" in pin_text(projection.build("t1")), "没再剪裁就不换便签"
+
+    engine.append_messages("t1", add_messages(database, "t1", 12, offset=30))
+    assert "第二版" in pin_text(projection.build("t1")), "下次剪裁时换成最新一版计划"
+
+    engine.invalidate("t1")  # 重启/缓存失效
+    assert "第二版" in pin_text(projection.build("t1")), "冷启动按最新快照重新渲染便签"

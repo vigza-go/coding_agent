@@ -12,6 +12,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from .config import Settings
 from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
+from .context.todo import open_items
+from .context.todo import render as todo_render
 from .integrations.langchain_agent import build_model, build_summary_model, create_langchain_agent
 from .integrations.middleware import RunContext
 from .integrations.search import make_search_client
@@ -56,6 +58,7 @@ class ThreadStatus:
     bash_enabled: bool
     search_enabled: bool
     work_state: dict[str, Any] | None
+    todos: list[dict[str, Any]] | None = None
 
 
 class TurnExecutionError(RuntimeError):
@@ -166,13 +169,22 @@ class AgentApplication:
                 config=config,
                 context=run_context,
             )
-            # 父模型给出答案不等于本轮结束：它派出去、还没交回的子代理算本轮的一部分。
-            # 等齐 → 报告作为一条注入消息再喂一步（模型据此继续干活，也可能又派新活），
-            # 循环到没有待收的活儿为止。这期间输入框根本没在等输入，用户发不进新消息，
-            # 所以 Ctrl-C 打的是"这一轮"，父子一起停。
-            while (report := self._collect_subagent_reports(thread_id, user_seq)) is not None:
+            # 父模型给出答案不等于本轮结束：先等派出去、还没交回的子代理；再回头看那张计划表
+            # 收没收尾。两条都是"再走一步"的理由。等齐 → 报告/提醒作为一条注入消息再喂一步，
+            # 循环到没有理由为止。这期间输入框根本没在等输入，用户发不进新消息，所以 Ctrl-C
+            # 打的是"这一轮"，父子一起停。
+            reminded = False
+            while True:
+                follow_up = self._collect_subagent_reports(thread_id, user_seq)
+                if follow_up is None and not reminded:
+                    # 软提醒**只给一次**：第二次再想收工就放行，否则会陷进死循环，还会诱导它
+                    # 靠改状态作弊（计划是它自己写的，也能自己改，硬闸门拦不住）。
+                    follow_up = self._todo_reminder(thread_id, user_seq)
+                    reminded = follow_up is not None
+                if follow_up is None:
+                    break
                 response = self.agent.invoke(
-                    {"messages": [report]},
+                    {"messages": [follow_up]},
                     config=config,
                     context=run_context,
                 )
@@ -224,6 +236,39 @@ class AgentApplication:
         # 它是"系统侧递进来的材料"，不是用户敲的话；靠 name 区分，不新增 role 或表。
         message = HumanMessage(
             id=str(uuid.uuid4()), name="subagent_report", content=f"【子代理回报】\n{report}"
+        )
+        with self.database.session() as session:
+            row = AgentRepository(session).add_message(
+                thread_id=thread_id,
+                user_seq=user_seq,
+                message_type=MessageType.USER,
+                content_json=encode_message(message),
+                langchain_message_id=message.id,
+            )
+        self.context_engine.append_messages(thread_id, [row])
+        return message
+
+    def _todo_reminder(self, thread_id: str, user_seq: int) -> HumanMessage | None:
+        """收工前还有没交代的计划项时，递一条提醒；没有就返回 None。
+
+        消息**必须先入库再投影**：``before_model`` 会整体覆盖 messages 通道，只塞进 invoke
+        入参模型是看不见的（与子代理报告同一条道理）。打 ``name`` 区分"系统递进来的"与
+        "用户敲的"，不新增 role 或表。
+        """
+
+        view = self.context_engine.current_todos(thread_id)
+        pending = open_items(view.items) if view is not None else []
+        if not pending:
+            return None
+        message = HumanMessage(
+            id=str(uuid.uuid4()),
+            name="todo_reminder",
+            content=(
+                f"【计划还没交代】收工前这张表里还有 {len(pending)} 项没收尾：\n\n"
+                f"{todo_render(pending)}\n\n"
+                "要么现在动手做完（做完标 completed），要么明确不做（标 cancelled 并把原因写进 "
+                "title），交代完再给结论。"
+            ),
         )
         with self.database.session() as session:
             row = AgentRepository(session).add_message(
@@ -304,6 +349,7 @@ class AgentApplication:
         with self.database.session() as session:
             conversation = AgentRepository(session).get_or_create_conversation(thread_id)
             snapshot = AgentRepository(session).latest_work_state(thread_id)
+            todo_snapshot = AgentRepository(session).latest_todos(thread_id)
             return ThreadStatus(
                 thread_id=thread_id,
                 active_head_seq=conversation.active_head_seq,
@@ -317,6 +363,7 @@ class AgentApplication:
                 bash_enabled=self.settings.agent.bash_enabled,
                 search_enabled=self.settings.agent.search_enabled,
                 work_state=snapshot.state_json if snapshot is not None else None,
+                todos=todo_snapshot.items_json if todo_snapshot is not None else None,
             )
 
 

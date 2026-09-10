@@ -13,6 +13,7 @@ from .models import (
     FileMutation,
     MemoryBlock,
     Message,
+    TodoSnapshot,
     WorkStateSnapshot,
 )
 
@@ -163,6 +164,28 @@ class AgentRepository:
                 WorkStateSnapshot.active.is_(True),
             )
             .order_by(WorkStateSnapshot.id.desc())
+            .limit(1)
+        )
+
+    def save_todos(self, thread_id: str, user_seq: int, items_json: list[Any]) -> TodoSnapshot:
+        snapshot = TodoSnapshot(
+            thread_id=thread_id,
+            user_seq=user_seq,
+            items_json=items_json,
+            active=True,
+        )
+        self.session.add(snapshot)
+        self.session.flush()
+        return snapshot
+
+    def latest_todos(self, thread_id: str) -> TodoSnapshot | None:
+        return self.session.scalar(
+            select(TodoSnapshot)
+            .where(
+                TodoSnapshot.thread_id == thread_id,
+                TodoSnapshot.active.is_(True),
+            )
+            .order_by(TodoSnapshot.id.desc())
             .limit(1)
         )
 

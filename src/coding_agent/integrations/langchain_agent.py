@@ -16,6 +16,7 @@ from langgraph.config import get_config
 
 from ..config import Settings
 from ..context.engine import ContextEngine
+from ..context.todo import TodoError
 from ..context.work_state import WorkStateError
 from ..persistence.database import Database
 from ..services.bash_execution import BashExecutionService
@@ -101,6 +102,39 @@ def make_work_state_tool(context_engine: ContextEngine):
     return work_state
 
 
+def make_todo_tool(context_engine: ContextEngine):
+    @tool("todo", parse_docstring=True)
+    def todo(items: list[dict[str, Any]]) -> str:
+        """我的计划表：一份有序的待办清单，用来把多步任务摆清楚、让进度看得见。
+
+        任务要好几步（先查 → 再改 → 再验）时，动手前先把步骤列出来；单步的小事直接做，
+        不要为它建计划。**每次提交的都是完整列表**（整表替换），不是增量的"加一条"——
+        你漏抄的项就等于被删掉。每项三个字段：
+
+        * ``id``：你自己起的稳定标识（"1"、"t1" 都行）；整表替换时靠它对齐新旧两版。
+        * ``title``：一行说清这一步做什么。细节和笔记写 work_state，不要塞这里。
+        * ``status``：pending / in_progress / completed / cancelled 四选一。同一时刻只能
+          有一个 in_progress；决定不做就标 cancelled，并把原因写进 title。
+
+        边做边更新：动手做哪一步就标 in_progress，做完立刻 completed，不要攒到最后一次补。
+        传空列表表示清掉整个计划。历史被剪裁后，框架会把最新一版计划贴回上下文，所以正常
+        情况下写完不用担心它丢。
+
+        Args:
+            items: 完整的计划列表，每项形如 {"id": "1", "title": "先读 DESIGN.md", "status": "pending"}。
+        """
+
+        configurable = get_config().get("configurable", {})
+        thread_id = str(configurable["thread_id"])
+        user_seq = int(configurable["user_seq"])
+        try:
+            return context_engine.mutate_todos(thread_id, user_seq, items)
+        except TodoError as error:
+            return f"Error: {error}"
+
+    return todo
+
+
 def make_search_tool(client: SearchClient):
     @tool("search_tool", parse_docstring=True)
     def search_tool(query: str, max_results: int = 3) -> str:
@@ -149,7 +183,7 @@ def shared_agent_tools(
     防止再套娃）。规则文件也在这里读：一次装配读一次，此后进程内不再变。
     """
 
-    tools: list[Any] = [make_work_state_tool(context_engine)]
+    tools: list[Any] = [make_work_state_tool(context_engine), make_todo_tool(context_engine)]
     if extra_tools:
         tools.extend(extra_tools)
     bash_prompt = ""
@@ -283,6 +317,8 @@ def create_langchain_agent(
               注意模仿用户的表达风格。
             """
             "文件工具路径与 bash 同规则：以 / 开头表示宿主机真实绝对路径，相对路径基于工作区根目录。"
+            "多步任务先用 todo 工具列计划并保持更新：动手前标 in_progress，做完立刻 completed，"
+            "收工时不许留下没交代的项（不做就标 cancelled 并写原因）；单步的小事直接做。"
             f"{prompt_suffix}"
         ),
     )

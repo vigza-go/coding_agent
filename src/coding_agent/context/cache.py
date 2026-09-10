@@ -9,11 +9,11 @@ from dataclasses import dataclass, field
 from threading import RLock
 
 from ..persistence.database import Database
-from ..persistence.models import Message, WorkStateSnapshot
+from ..persistence.models import Message, TodoSnapshot, WorkStateSnapshot
 from ..persistence.repository import AgentRepository
 from .cover import ContextPiece, greedy_cover
-from .records import MemoryBlockSnapshot, MessageSnapshot, WorkStateView
-from .work_state import render
+from .pin import render_pin
+from .records import MemoryBlockSnapshot, MessageSnapshot, TodoView, WorkStateView
 
 
 class ContextCacheInvariantError(RuntimeError):
@@ -26,6 +26,9 @@ class ThreadContextState:
     selected_blocks: list[MemoryBlockSnapshot] = field(default_factory=list)
     working_messages: list[MessageSnapshot] = field(default_factory=list)
     work_state: WorkStateView | None = None
+    # 计划的最新有效版本。它和 work_state 一样不每轮注入：模型在 ReAct 里看到的是自己
+    # 写出来的工具消息；历史被剪掉之后，由下面那张便签把它接住。
+    todos: TodoView | None = None
     # 便签：剪裁/压缩把投影弄断的那一刻，顺手把最新 work_state 正文贴在这里。
     # 它是**派生视图**（不落库、不进 messages/memory_blocks，也不是一条真消息），平日原样
     # 冻着，只有剪裁那条路径会刷新它——这样两次剪裁之间投影逐字节不变、缓存全中。存渲染好
@@ -125,6 +128,19 @@ class ThreadContextCache:
                 return None
             return WorkStateView(state.work_state.id, deepcopy(state.work_state.state_json))
 
+    def current_todos(self, thread_id: str) -> TodoView | None:
+        with self.locked(thread_id) as state:
+            if state.todos is None:
+                return None
+            return TodoView(state.todos.id, deepcopy(state.todos.items))
+
+    def update_todos(self, thread_id: str, row: TodoSnapshot) -> None:
+        if row.thread_id != thread_id:
+            raise ContextCacheInvariantError("cannot cache todos from another thread")
+        with self.locked(thread_id) as state:
+            if state.todos is None or row.id >= state.todos.id:
+                state.todos = TodoView.from_model(row)
+
     def pieces(self, thread_id: str) -> list[ContextPiece]:
         with self.locked(thread_id) as state:
             return state.pieces()
@@ -138,6 +154,7 @@ class ThreadContextCache:
                 for row in repo.memory_blocks(thread_id, active_only=True)
             ]
             work_state_row = repo.latest_work_state(thread_id)
+            todo_row = repo.latest_todos(thread_id)
 
         pieces = greedy_cover(messages, blocks)
         blocks_by_id = {block.id: block for block in blocks}
@@ -164,11 +181,15 @@ class ThreadContextCache:
             work_state=(
                 WorkStateView.from_model(work_state_row) if work_state_row is not None else None
             ),
-            # 冷启动（重启/缓存失效）后便签得自己长回来：只要历史上压过块、且 work_state
-            # 有内容，就按最新快照重新渲染一版。冷启动本来就全量重编码，这一刻贴它不额外花钱。
+            todos=TodoView.from_model(todo_row) if todo_row is not None else None,
+            # 冷启动（重启/缓存失效）后便签得自己长回来：只要历史上压过块，就按最新快照重新渲染
+            # 一版（计划 + 工作状态）。冷启动本来就全量重编码，这一刻贴它不额外花钱。
             pin_work_state=(
-                render(work_state_row.state_json)
-                if selected_blocks and work_state_row is not None and work_state_row.state_json
+                render_pin(
+                    todo_row.items_json if todo_row is not None else None,
+                    work_state_row.state_json if work_state_row is not None else None,
+                )
+                if selected_blocks
                 else None
             ),
         )

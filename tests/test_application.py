@@ -339,3 +339,58 @@ def test_clear_context_leaves_nothing_for_the_model_to_see(database, tmp_path):
 
     app.run_turn("t1", "第三句")
     assert projected_history(projection, "t1") == ["第三句"]
+
+
+def test_open_plan_items_bring_the_model_back_for_one_more_round(database, tmp_path):
+    """收工前还有没交代的计划项：递一条提醒再走一步——软提醒，不是硬闸门。"""
+
+    agent = ScriptedAgent("我干完了")
+    app = _app(database, tmp_path, agent)
+    app.context_engine.mutate_todos(
+        "t1",
+        1,
+        [
+            {"id": "1", "title": "写代码", "status": "completed"},
+            {"id": "2", "title": "补测试", "status": "pending"},
+        ],
+    )
+
+    app.run_turn("t1", "做那件事")
+
+    assert len(agent.calls) == 2, "计划没交代完就得再喂一步"
+    injected = agent.calls[1][0]["messages"][0]
+    assert getattr(injected, "name", None) == "todo_reminder"
+    assert "补测试" in injected.content
+    # 提醒得进时间轴：投影只认库里的行，只塞进 invoke 入参模型看不见
+    with database.session() as session:
+        rows = session.execute(select(Message).where(Message.user_seq == 1)).scalars().all()
+    assert any(getattr(decode_message(row), "name", None) == "todo_reminder" for row in rows)
+
+
+def test_the_reminder_is_given_only_once(database, tmp_path):
+    """第二次还想收工就放行：不听就不再啰嗦，免得陷进死循环或逼它改状态作弊。"""
+
+    agent = ScriptedAgent("还是不做")
+    app = _app(database, tmp_path, agent)
+    app.context_engine.mutate_todos("t1", 1, [{"id": "1", "title": "补测试", "status": "pending"}])
+
+    app.run_turn("t1", "做那件事")
+
+    assert len(agent.calls) == 2
+
+
+def test_a_finished_plan_does_not_trigger_a_reminder(database, tmp_path):
+    agent = ScriptedAgent("做完了")
+    app = _app(database, tmp_path, agent)
+    app.context_engine.mutate_todos(
+        "t1",
+        1,
+        [
+            {"id": "1", "title": "写代码", "status": "completed"},
+            {"id": "2", "title": "老方案", "status": "cancelled"},
+        ],
+    )
+
+    app.run_turn("t1", "做那件事")
+
+    assert len(agent.calls) == 1, "全部交代清楚（完成或明确放弃）就别多嘴"

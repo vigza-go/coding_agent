@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from ..config import ContextSettings
 from ..persistence.database import Database
-from ..persistence.models import MemoryBlock, Message, WorkStateSnapshot
+from ..persistence.models import MemoryBlock, Message, TodoSnapshot, WorkStateSnapshot
 from ..persistence.repository import AgentRepository
 from .cache import ThreadContextCache, ThreadContextState
 from .compaction import (
@@ -21,10 +21,13 @@ from .compaction import (
     split_atomic_units_token_balanced,
 )
 from .cover import ContextPiece
-from .records import MemoryBlockSnapshot, MessageSnapshot, WorkStateView
+from .pin import render_pin
+from .records import MemoryBlockSnapshot, MessageSnapshot, TodoView, WorkStateView
 from .summarizer import RetryingSummarizer, Summarizer
+from .todo import normalize as normalize_todos
+from .todo import receipt as todo_receipt
 from .tokens import estimate_tokens
-from .work_state import READ_OPS, apply_op, render
+from .work_state import READ_OPS, apply_op
 
 
 class CompressionInvariantError(RuntimeError):
@@ -102,6 +105,41 @@ class ContextEngine:
             # 只读操作不落库，也就不会产生新快照，派生缓存保持原样。
             if saved is not None:
                 self.cache.update_work_state(thread_id, saved)
+        return receipt
+
+    def update_todos(self, thread_id: str, row: TodoSnapshot) -> None:
+        """权威行提交后，更新派生的计划视图。"""
+
+        try:
+            self.cache.update_todos(thread_id, row)
+        except Exception:
+            self.cache.invalidate(thread_id)
+            raise
+
+    def current_todos(self, thread_id: str) -> TodoView | None:
+        return self.cache.current_todos(thread_id)
+
+    def mutate_todos(self, thread_id: str, user_seq: int, items: object) -> str:
+        """在一次持锁期内完成「读最新 → 校验 → 写回」，返回给模型的回执。
+
+        整表替换：模型每次提交完整列表，这里只做校验、比对与落快照。锁的理由与
+        ``mutate_work_state`` 相同——框架会并行执行同一批工具调用，没有这把锁时两个并发写从
+        同一基线出发，后写的整份覆盖前者（静默丢状态）。校验在写之前完成，坏参数不留半改状态。
+
+        **内容没变就不落新快照**：新快照 = 新 id = 便签下次剪裁时换新，一次什么都没改的重复
+        提交不该换来一次投影变化。
+        """
+
+        with self.cache.locked(thread_id):
+            with self.database.session() as session:
+                repo = AgentRepository(session)
+                row = repo.latest_todos(thread_id)
+                before = row.items_json if row is not None else []
+                after = normalize_todos(items)
+                receipt = todo_receipt(before, after)
+                saved = repo.save_todos(thread_id, user_seq, after) if after != before else None
+            if saved is not None:
+                self.cache.update_todos(thread_id, saved)
         return receipt
 
     def invalidate(self, thread_id: str) -> None:
@@ -261,13 +299,15 @@ class ContextEngine:
         return len(before) != len(after) or any(a is not b for a, b in zip(before, after))
 
     def _refresh_pin(self, state: ThreadContextState) -> None:
-        """把便签刷成最新 work_state 正文；没有内容就清空它。
+        """把便签刷成最新的「计划 + 工作状态」；两样都空就清空它。
 
         只在剪裁/压缩之后调用——这是唯一刷新便签的入口，保证两次剪裁之间便签逐字节不变。
         """
 
-        view = state.work_state
-        state.pin_work_state = render(view.state_json) if view and view.state_json else None
+        state.pin_work_state = render_pin(
+            state.todos.items if state.todos is not None else None,
+            state.work_state.state_json if state.work_state is not None else None,
+        )
 
     def _compact_prefix(self, state: ThreadContextState, working: list[MessageSnapshot]) -> int:
         """把冷前缀压成 L0 记忆块，尾部按 recent_tail_ratio 原样保留。返回新建块数。"""

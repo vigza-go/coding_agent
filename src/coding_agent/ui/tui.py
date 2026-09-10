@@ -22,6 +22,7 @@ from rich.text import Text
 
 from ..application import AgentApplication, TurnExecutionError, create_application
 from ..config import load_settings
+from ..context.todo import render as todo_render
 from ..integrations.desktop import DesktopService
 from ..persistence.thread_lock import ThreadBusyError
 from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
@@ -408,6 +409,13 @@ class TerminalUI:
             ),
         )
         self.console.print(Panel(context, title="上下文", title_align="left"))
+        self.console.print(
+            Panel(
+                todo_render(status.todos) if status.todos else "（没有计划）",
+                title="计划",
+                title_align="left",
+            )
+        )
         if status.work_state is None:
             self.console.print("[dim]当前没有 work state。[/dim]")
         else:
@@ -472,7 +480,9 @@ class TerminalUI:
 
     def _confirm_and_rollback(self, user_seq: int) -> None:
         preview = self.app.rollback_preview(self.thread_id, user_seq)
-        if not any((preview.messages, preview.file_mutations, preview.work_states)):
+        if not any(
+            (preview.messages, preview.file_mutations, preview.work_states, preview.todos)
+        ):
             self.console.print(f"user_seq >= {user_seq} 没有可撤销的有效内容。")
             return
         table = Table("撤销范围", "数量", box=None)
@@ -480,6 +490,7 @@ class TerminalUI:
         table.add_row("文件 mutation", str(preview.file_mutations))
         table.add_row("不同文件", str(preview.files))
         table.add_row("work state", str(preview.work_states))
+        table.add_row("计划快照", str(preview.todos))
         self.console.print(table)
         if Confirm.ask(
             f"确认撤销 thread={self.thread_id} 中 user_seq >= {user_seq} 吗？",
@@ -497,12 +508,13 @@ class TerminalUI:
 
     def _confirm_and_clear(self) -> None:
         preview = self.app.rollback_preview(self.thread_id, 1)
-        if not any((preview.messages, preview.work_states)):
+        if not any((preview.messages, preview.work_states, preview.todos)):
             self.console.print("当前线程没有可清空的上下文。")
             return
         table = Table("将被停用", "数量", box=None)
         table.add_row("消息", str(preview.messages))
         table.add_row("work state", str(preview.work_states))
+        table.add_row("计划快照", str(preview.todos))
         self.console.print(table)
         if preview.file_mutations:
             # 清空的是"模型下次看到什么"，不是"磁盘上有什么"。旧的文件账留在它自己那一轮上，
