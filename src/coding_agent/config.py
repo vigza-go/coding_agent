@@ -12,6 +12,12 @@ class ContextSettings:
     total_tokens: int = 1_000_000
     compression_ratio: float = 0.25
     working_trigger_ratio: float = 0.50
+    # 剪裁（冷思维链 + 旧工具结果）之后，工作集必须落到触发线的这个比例**以下**，才算
+    # "剪出了余量"，这时候吃剪裁的便宜：省一次摘要调用，也省掉一段原文被改写成摘要。
+    # 剪完还剩一大截，说明大头是对话正文本身，工具结果和冷草稿身上刮不出多少——直接压缩。
+    # 注意别把它调到 1.0：那就退化成"剪到刚好压线"，下一轮一个工具结果就能再顶过线，
+    # 于是又剪一次、又断一次前缀，等于拿剪裁当滑动窗口，每轮都改写投影。
+    trim_sufficient_ratio: float = 0.50
     recent_tail_ratio: float = 0.20
     l0_block_count: int = 4
     summary_concurrency: int = 4
@@ -25,6 +31,7 @@ class ContextSettings:
         ratios = {
             "compression_ratio": self.compression_ratio,
             "working_trigger_ratio": self.working_trigger_ratio,
+            "trim_sufficient_ratio": self.trim_sufficient_ratio,
             "recent_tail_ratio": self.recent_tail_ratio,
             "summary_target_ratio": self.summary_target_ratio,
         }
@@ -51,6 +58,10 @@ class ContextSettings:
     @property
     def working_trigger(self) -> int:
         return int(self.total_tokens * self.working_trigger_ratio)
+
+    @property
+    def trim_sufficient_line(self) -> int:
+        return int(self.working_trigger * self.trim_sufficient_ratio)
 
     @property
     def reasoning_budget(self) -> int:

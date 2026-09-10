@@ -6,8 +6,13 @@
   ``as_text`` 会把它稳定地摊平成 JSON 文本，所以读写不会炸。
 * **不依赖存储的键序**。MySQL 的 JSON 列会把键规范化
   （插入 ``zz,a,mmm,b`` 读出 ``a,b,zz,mmm``），SQLite 则可能保留插入顺序。
-  所以渲染一律走 :func:`ordered`：钉住键优先、其余按字典序，跨引擎确定。
+  所以渲染一律走 :func:`ordered`：按键名排序，跨引擎确定。
 * **不做预算硬闸门**。只回报体积，让人自己决定要不要删。
+
+工作状态是 **agent 自己的备忘录**（见工具描述）：内容不每轮自动注入，agent 需要时
+用 ``list`` / ``get`` 主动翻；历史被剪裁或压缩时，框架才把最新一版作为"便签"贴回
+上下文最前面（见 ``context/cache.py`` 的 ``pin_work_state`` 与
+``context/engine.py`` 的 ``_refresh_pin``）。
 """
 
 from __future__ import annotations
@@ -16,14 +21,6 @@ import json
 from typing import Any
 
 from .tokens import estimate_tokens
-
-PIN_PREFIX = "!"
-"""键名前缀：被钉住的键每轮都注入正文，即使内容没变。
-
-省略正文的前提是"上一轮已经给过、还能回看"，但投影每轮用
-``RemoveMessage`` 整段重建，注入消息也不进 canonical 历史，所以"没变就只留
-索引"等于让模型看不见它。钉住位是给"否决/边界"这类必须常驻的键留的口子。
-"""
 
 MAX_KEY_CHARS = 64
 READ_OPS = frozenset({"list", "get"})
@@ -48,32 +45,15 @@ def flatten(state: dict[str, Any]) -> dict[str, str]:
 
 
 def ordered(state: dict[str, Any]) -> list[tuple[str, str]]:
-    """钉住的键在前，其余按键名字典序；与数据库返回顺序无关。"""
+    """按键名字典序排序；与数据库返回顺序无关。"""
 
-    flat = flatten(state)
-    return sorted(flat.items(), key=lambda item: (not item[0].startswith(PIN_PREFIX), item[0]))
+    return sorted(flatten(state).items())
 
 
 def render(state: dict[str, Any]) -> str:
     """完整正文渲染。"""
 
     return "\n\n".join(f"## {key}\n{text}" for key, text in ordered(state))
-
-
-def render_index(state: dict[str, Any]) -> str:
-    """只给键名与体积，用于"内容未变"时占位；钉住的键仍然给正文。"""
-
-    lines = [
-        f"{key} {estimate_tokens(text)}t" + (" (pinned)" if key.startswith(PIN_PREFIX) else "")
-        for key, text in ordered(state)
-    ]
-    body = "\n\n".join(
-        f"## {key}\n{text}" for key, text in ordered(state) if key.startswith(PIN_PREFIX)
-    )
-    head = "work state unchanged since the previous injection; keys: " + (
-        ", ".join(lines) if lines else "(empty)"
-    )
-    return f"{head}\n{body}" if body else head
 
 
 def _require_key(op: str, key: str | None) -> str:

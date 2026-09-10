@@ -98,9 +98,10 @@ def compaction_settings(messages: list[MessageSnapshot], *, keep: int = 2):
     raw_tokens = sum(message_tokens(message) for message in messages)
     trimmed_tokens = sum(message_tokens(message) for message in trimmed)
     assert raw_tokens > trimmed_tokens
-    # Trimming alone falls below the trigger; the already-triggered summarization still runs.
+    # 触发线卡在 1.5×剪裁后的体积上：这些用例验的是压缩本身，所以要保证"剪完仍然没剪出
+    # 余量"（超过余量线），压缩才会真的跑起来；压完落到尾部比例、稳稳低于触发线。
     return ContextSettings(
-        total_tokens=raw_tokens + trimmed_tokens,
+        total_tokens=trimmed_tokens * 3,
         recent_tool_interactions=keep,
         recent_tail_ratio=0.8,
         summary_concurrency=1,

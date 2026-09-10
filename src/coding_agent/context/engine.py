@@ -24,7 +24,7 @@ from .cover import ContextPiece
 from .records import MemoryBlockSnapshot, MessageSnapshot, WorkStateView
 from .summarizer import RetryingSummarizer, Summarizer
 from .tokens import estimate_tokens
-from .work_state import READ_OPS, apply_op
+from .work_state import READ_OPS, apply_op, render
 
 
 class CompressionInvariantError(RuntimeError):
@@ -120,7 +120,7 @@ class ContextEngine:
 
     def compact_if_needed(self, thread_id: str) -> CompactionResult:
         with self.cache.locked(thread_id) as state:
-            created = self._create_l0_if_needed(state)
+            created = self._slim_and_compact(state)
             merges = self._merge_until_within_budget(state)
             return CompactionResult(created, merges)
 
@@ -216,23 +216,52 @@ class ContextEngine:
                 result.append(message)
         return result
 
-    def _create_l0_if_needed(self, state: ThreadContextState) -> int:
+    def _slim_and_compact(self, state: ThreadContextState) -> int:
         working = state.working_messages
         working_tokens = sum(message_tokens(message) for message in working)
         if working_tokens <= self.settings.working_trigger:
             return 0
 
-        # 撑到线上时先剪冷思维链，再动摘要器：这是此处唯一不花 API 调用、也不丢记忆块的缩减
-        # 手段。只在撑到时才剪、而不是每轮都剪，缓存前缀才活得下来——缓存的代价取决于改动落在
-        # 提示词多靠前的位置，而不是改动有多大。见 ContextSettings.reasoning_budget。
+        # 撑到线上才动，而且两种剪裁**一次做完**：剪裁会断前缀，触发一次付一次代价。分步碎剪
+        # （这次剪思维链、下次剪工具结果）会把"断前缀"的次数翻倍——每次触发都改写投影，而缓存
+        # 的代价取决于改动落在提示词多靠前的位置，不是改动大小。宁可在一次触发里多剪一点，也别
+        # 把触发次数堆起来。见 ContextSettings.reasoning_budget / recent_tool_interactions。
         working = self._retain_reasoning_within_budget(working, self.settings.reasoning_budget)
+        # 冷思维链的剪裁**立刻**写回 state：它不花 API、也不丢记忆块（账本里原文还在），所以
+        # 万一后面摘要失败，这次剪裁留在缓存里不回退——回退只会让下一轮在同一位置重剪一次。
         state.working_messages = working
-        working_tokens = sum(message_tokens(message) for message in working)
-        if working_tokens <= self.settings.working_trigger:
-            return 0
 
-        # 一旦触发就只剪这一次，然后对剪完的消息做分区。
+        # 旧工具结果不一样：它只在压缩成功时才写回 state。摘要失败时状态必须逐字节不动，
+        # 否则模型会看到一批"这次没打算留下的"裁剪。
         working = self._trim_old_tool_results(working, self.settings.recent_tool_interactions)
+
+        # 判据不是"剪到线下就算数"，而是"剪出了多少余量"。只剪到刚好压线，下一轮一个工具
+        # 结果就能再顶过线，于是又剪一次、又断一次前缀——那等于拿剪裁当滑动窗口，每轮都改写
+        # 投影。剪完还剩一大截，说明大头是对话正文本身，工具结果和冷草稿身上刮不出多少，
+        # 该动的是压缩，不是继续刮。见 ContextSettings.trim_sufficient_ratio。
+        if sum(message_tokens(message) for message in working) <= self.settings.trim_sufficient_line:
+            state.working_messages = working
+            created = 0
+        else:
+            created = self._compact_prefix(state, working)
+
+        # 投影已经因为剪裁/压缩改变，这时候顺手把最新 work_state 贴成便签是搭便车，不额外多断
+        # 一次前缀。没超线的那条路径不碰便签，投影逐字节不变、缓存全中。
+        self._refresh_pin(state)
+        return created
+
+    def _refresh_pin(self, state: ThreadContextState) -> None:
+        """把便签刷成最新 work_state 正文；没有内容就清空它。
+
+        只在剪裁/压缩之后调用——这是唯一刷新便签的入口，保证两次剪裁之间便签逐字节不变。
+        """
+
+        view = state.work_state
+        state.pin_work_state = render(view.state_json) if view and view.state_json else None
+
+    def _compact_prefix(self, state: ThreadContextState, working: list[MessageSnapshot]) -> int:
+        """把冷前缀压成 L0 记忆块，尾部按 recent_tail_ratio 原样保留。返回新建块数。"""
+
         working_tokens = sum(message_tokens(message) for message in working)
         units = atomic_message_units(working)
         tail_target = math.ceil(working_tokens * self.settings.recent_tail_ratio)

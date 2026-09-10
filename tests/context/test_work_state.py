@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+
 import pytest
+from langchain_core.messages import HumanMessage
 
 from coding_agent.config import ContextSettings
 from coding_agent.context.engine import ContextEngine
@@ -12,21 +15,58 @@ from coding_agent.context.work_state import (
     flatten,
     ordered,
     render,
-    render_index,
 )
+from coding_agent.persistence.models import MessageType
 from coding_agent.persistence.repository import AgentRepository
 from coding_agent.services.context_projection import ContextProjectionService
 
 
-def save_state(database, thread_id: str, user_seq: int, state: dict) -> int:
-    """写一版工作状态并同步派生缓存，返回快照 id（与工具落库路径一致）。"""
+def make_engine(database, **overrides) -> ContextEngine:
+    return ContextEngine(database, ContextSettings(**overrides), DeterministicSummarizer())
 
+
+def save_state(database, thread_id: str, user_seq: int, state: dict) -> int:
     with database.session() as session:
         saved = AgentRepository(session).save_work_state(thread_id, user_seq, state)
-    ContextEngine(database, ContextSettings(), DeterministicSummarizer()).update_work_state(
-        thread_id, saved
-    )
     return int(saved.id)
+
+
+def add_messages(database, thread_id: str, count: int, *, chars: int = 400, offset: int = 0):
+    with database.session() as session:
+        repo = AgentRepository(session)
+        rows = [
+            repo.add_message(
+                thread_id=thread_id,
+                user_seq=offset + index + 1,
+                message_type=MessageType.USER,
+                content_json={"type": "human", "data": {"content": str(index) + "x" * chars}},
+                langchain_message_id=f"{thread_id}-m-{offset + index}",
+            )
+            for index in range(count)
+        ]
+    return rows
+
+
+def pin_text(messages) -> str:
+    return "\n".join(
+        message.content
+        for message in messages
+        if getattr(message, "name", None) == "work_state"
+    )
+
+
+# 30 条 400 字的消息约 3000 token：触发线 1000 撑得到，压完尾部 ~600 又稳稳落回线下，
+# 所以第二次 build 不会再触发——"便签冻住、投影逐字节不变"才测得出来。
+COMPACT = {
+    "total_tokens": 2000,
+    "working_trigger_ratio": 0.5,
+    "recent_tail_ratio": 0.2,
+    "l0_block_count": 2,
+    "summary_concurrency": 1,
+}
+
+
+# --------------------------------------------------------------------------- 字典操作
 
 
 def test_set_then_get_touches_only_one_key():
@@ -94,91 +134,113 @@ def test_get_of_a_missing_key_reports_available_keys():
     assert "no such key" in receipt and "goal" in receipt
 
 
-def test_ordered_pins_first_and_is_independent_of_insertion_order():
-    """MySQL 的 JSON 列会规范化键序，所以渲染顺序必须由我们自己定死。"""
+def test_ordered_is_independent_of_insertion_order():
+    """MySQL 的 JSON 列会规范化键序，所以渲染顺序必须由我们自己定死（按键名排序）。"""
 
-    state = {"zz": "3", "!vetoed": "0", "aaa": "9", "!pinned": "keep"}
-    assert [key for key, _ in ordered(state)] == ["!pinned", "!vetoed", "aaa", "zz"]
-
-
-def test_render_index_drops_bodies_but_keeps_pinned_ones():
-    state = {"goal": "很长的正文内容", "!vetoed": "不得重提"}
-    body = render(state)
-    index = render_index(state)
-    assert "很长的正文内容" in body and "很长的正文内容" not in index
-    assert "不得重提" in index and "goal" in index
+    state = {"zz": "3", "aaa": "9", "mmm": "1"}
+    assert [key for key, _ in ordered(state)] == ["aaa", "mmm", "zz"]
+    assert render({"b": "2", "a": "1"}) == "## a\n1\n\n## b\n2"
 
 
-def test_projection_repeats_index_until_the_state_is_rewritten(database):
-    """内容没变就只重发索引；重写一版之后必须重新给全文（钉住的键任何时候都给正文）。"""
+# --------------------------------------------------------------------------- 投影 / 便签
 
-    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+
+def test_work_state_is_not_injected_every_turn(database):
+    """没剪裁过的会话，工作状态不自动出现在上下文里（去掉了每轮无条件注入）。"""
+
+    save_state(database, "t1", 1, {"goal": "不该每轮出现的正文"})
+    engine = make_engine(database)
+    messages = ContextProjectionService(engine).build("t1")
+    assert not any(getattr(message, "name", None) == "work_state" for message in messages)
+
+
+def test_pin_appears_only_after_trim_and_carries_the_latest_state(database):
+    """撑过触发线、发生剪裁/压缩时，才把最新一版贴成便签，且用 HumanMessage 承载。"""
+
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"goal": "跨轮要记住的目标正文"})
+    engine = make_engine(database, **COMPACT)
     projection = ContextProjectionService(engine)
-    snapshot_id = save_state(
-        database, "t1", 1, {"goal": "唯一一份目标正文", "!vetoed": "不得重提的否决"}
+    messages = projection.build("t1")
+
+    pins = [message for message in messages if getattr(message, "name", None) == "work_state"]
+    assert pins, "剪裁之后应当出现便签"
+    assert "跨轮要记住的目标正文" in pins[0].content
+    assert pins[0].content.startswith("<current_work_state>")
+    assert isinstance(pins[0], HumanMessage), "便签必须是 HumanMessage，不能是 SystemMessage"
+
+    # 位置：压缩块之后、原文之前。
+    assert [piece.kind for piece in engine.rebuild("t1")] == ["memory", "work_state", "raw"]
+
+    # 便签只在剪裁那一下换新：压完已经落回线下，下一轮必须逐字节不动。
+    frozen = [message.content for message in messages]
+    assert [message.content for message in projection.build("t1")] == frozen
+
+
+def test_pin_is_a_view_and_never_reaches_storage(database):
+    """便签是渲染时贴上的派生视图：不落库、不进 messages 表、不进 memory_blocks。"""
+
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"goal": "只该活在投影里的正文"})
+    engine = make_engine(database, **COMPACT)
+    messages = ContextProjectionService(engine).build("t1")
+    assert any(getattr(message, "name", None) == "work_state" for message in messages), (
+        "先确认便签确实出现了，否则这条断言是空的"
     )
-    engine.update_work_state("t1", _reload(database, "t1", snapshot_id))
-
-    first = projection.build("t1")[-1].content
-    assert "唯一一份目标正文" in first
-
-    second = projection.build("t1")[-1].content
-    assert "唯一一份目标正文" not in second, "未变的内容不应重发全文"
-    assert "不得重提的否决" in second, "钉住的键必须常驻"
-    assert "goal" in second, "键名要留在索引里"
-
-    assert not second.startswith("work state unchanged"), "同一快照的第三次仍是索引"
-    third = projection.build("t1")[-1].content
-    assert third == second
-
-    new_id = save_state(database, "t1", 2, {"goal": "改写后的目标正文"})
-    engine.update_work_state("t1", _reload(database, "t1", new_id))
-    fourth = projection.build("t1")[-1].content
-    assert "改写后的目标正文" in fourth
-
-
-def _reload(database, thread_id: str, snapshot_id: int):
-    from sqlalchemy import select
-
-    from coding_agent.persistence.models import WorkStateSnapshot
 
     with database.session() as session:
-        row = session.scalars(
-            select(WorkStateSnapshot).where(WorkStateSnapshot.id == snapshot_id)
-        ).one()
-        session.expunge(row)
-    return row
+        repo = AgentRepository(session)
+        stored = " ".join(
+            json.dumps(row.content_json, ensure_ascii=False) for row in repo.active_messages("t1")
+        ) + " ".join(block.text for block in repo.memory_blocks("t1"))
+    assert "只该活在投影里的正文" not in stored
 
 
-def test_rollback_to_an_older_snapshot_gets_the_full_text_again(database):
-    """撤销后 latest 退回更早的 id：必须重新给全文，不能因为"发过"而只给索引。
+def test_projection_is_byte_stable_when_nothing_trims(database):
+    """两次 build 之间没有任何剪裁 → 投影逐字节不变（缓存前缀全员命中）。"""
 
-    判据是"和上一轮发出去的 id 相同"，而不是"这个 id 曾经发过"，所以方向是安全的。
+    add_messages(database, "t1", 5)
+    save_state(database, "t1", 1, {"goal": "目标"})
+    engine = make_engine(database)  # 默认触发线 50 万，这几条消息撑不到
+    projection = ContextProjectionService(engine)
+
+    first = projection.build("t1")
+    second = projection.build("t1")
+    assert [message.content for message in first] == [message.content for message in second]
+    assert not any(getattr(message, "name", None) == "work_state" for message in second)
+
+
+def test_pin_recovers_on_cold_load_when_history_was_compressed(database):
+    """重启/缓存失效后，只要历史上压过块且 work_state 有内容，便签要自己长回来。"""
+
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"goal": "冷启动也要有的正文"})
+    engine = make_engine(database, **COMPACT)
+    ContextProjectionService(engine).build("t1")  # 压出块、落下便签
+
+    engine.invalidate("t1")  # 模拟重启：缓存清空，只能从库里重建
+    messages = ContextProjectionService(engine).build("t1")
+    assert "冷启动也要有的正文" in pin_text(messages)
+
+
+def test_pin_refreshes_at_the_next_trim_not_on_every_write(database):
+    """写完一版不算数：便签要等到下一次剪裁/压缩才换新（压缩那条路也算）。
+
+    每次写就换，等于模型一调 work_state 工具就断一次前缀——便签在投影中段，改它等于把
+    它后面整段原文的前缀也废掉。
     """
 
-    from sqlalchemy import update
-
-    from coding_agent.persistence.models import WorkStateSnapshot
-
-    engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
+    add_messages(database, "t1", 30)
+    engine = make_engine(database, **COMPACT)
     projection = ContextProjectionService(engine)
+    engine.mutate_work_state("t1", 1, "set", "goal", "第一版")
 
-    first = save_state(database, "t1", 1, {"goal": "第一轮的目标正文"})
-    engine.update_work_state("t1", _reload(database, "t1", first))
-    assert "第一轮的目标正文" in projection.build("t1")[-1].content
-    assert "第一轮的目标正文" not in projection.build("t1")[-1].content
+    assert "第一版" in pin_text(projection.build("t1")), "越线剪裁那一下把便签贴上"
 
-    second = save_state(database, "t1", 2, {"goal": "第二轮的目标正文"})
-    engine.update_work_state("t1", _reload(database, "t1", second))
-    assert "第二轮的目标正文" in projection.build("t1")[-1].content
+    engine.mutate_work_state("t1", 2, "set", "goal", "第二版")
+    stale = pin_text(projection.build("t1"))
+    assert "第一版" in stale and "第二版" not in stale, "没剪裁，便签必须冻着"
 
-    with database.session() as session:
-        session.execute(
-            update(WorkStateSnapshot)
-            .where(WorkStateSnapshot.id == second)
-            .values(active=False)
-        )
-    engine.invalidate("t1")
-
-    body = projection.build("t1")[-1].content
-    assert "第一轮的目标正文" in body, "回滚到更早快照必须重新给全文"
+    engine.append_messages("t1", add_messages(database, "t1", 12, offset=30))  # 再顶过线
+    refreshed = ContextProjectionService(engine).build("t1")
+    assert "第二版" in pin_text(refreshed), "下一次剪裁/压缩时，便签换成最新一版"

@@ -161,7 +161,14 @@ def _settings() -> ContextSettings:
 
 
 def test_trim_runs_only_at_the_wall_and_spares_the_summarizer(database) -> None:
+    """冷草稿占了大头：剪完明显落到余量线以下，这一次摘要就该省下来。
+
+    最新一轮的草稿按规矩一定留着（一轮对话不能丢掉"这次调用是怎么想出来的"），所以让它
+    很小，冷的那几段给足体积——剪裁才有得赚。
+    """
+
     settings = _settings()
+    thinking_chars = [70] * 7 + [2]
     with database.session() as session:
         repo = AgentRepository(session)
         for index in range(1, 9):
@@ -169,7 +176,7 @@ def test_trim_runs_only_at_the_wall_and_spares_the_summarizer(database) -> None:
                 thread_id="t1",
                 user_seq=index,
                 message_type=MessageType.ASSISTANT,
-                content_json=reasoning(index, chars=90).content_json,
+                content_json=reasoning(index, chars=thinking_chars[index - 1]).content_json,
                 langchain_message_id=f"a-{index}",
             )
 
@@ -177,14 +184,14 @@ def test_trim_runs_only_at_the_wall_and_spares_the_summarizer(database) -> None:
     assert engine.usage("t1").working_tokens > settings.working_trigger
 
     result = engine.compact_if_needed("t1")
-    assert result.l0_blocks_created == 0, "剪掉冷草稿就够了，不该动用摘要器"
+    assert result.l0_blocks_created == 0, "剪掉冷草稿就剪出了余量，不该动用摘要器"
     assert result.merges_completed == 0
     with database.session() as session:
         assert AgentRepository(session).memory_blocks("t1") == [], "没有摘要块=一次 API 都没花"
 
     usage = engine.usage("t1")
     assert usage.working_messages == 8, "消息一条都不能少，只是草稿不再投影"
-    assert usage.working_tokens <= settings.working_trigger
+    assert usage.working_tokens <= settings.trim_sufficient_line, "剪完必须落到余量线以下"
 
     projected = next(
         piece.messages for piece in engine.rebuild("t1") if piece.kind == "raw"
@@ -201,4 +208,38 @@ def test_trim_runs_only_at_the_wall_and_spares_the_summarizer(database) -> None:
     frozen = engine.usage("t1").working_tokens
     again = engine.compact_if_needed("t1")
     assert (again.l0_blocks_created, again.merges_completed) == (0, 0)
-    assert engine.usage("t1").working_tokens == frozen, "回到线下之后，下一轮不得再动投影"
+    assert engine.usage("t1").working_tokens == frozen, "回到余量线以下之后，下一轮不得再动投影"
+
+
+def heavy_text(index: int, chars: int = 400) -> MessageSnapshot:
+    """正文很占地方、草稿几乎没有：剪裁从它身上刮不出余量。"""
+
+    snapshot = reasoning(index, chars=2)
+    snapshot.content_json["data"]["content"][1]["text"] = "x" * chars
+    return snapshot
+
+
+def test_trimming_that_only_reaches_the_wall_still_compacts(database) -> None:
+    """剪完只压到"线下但没剪出余量"→ 不省这一次摘要：下一轮一个工具结果就能再顶过线。
+
+    这条是防退化的：判据一旦变成"剪到线下就算数"，剪裁就变成滑动窗口，每轮都改写投影。
+    """
+
+    settings = _settings()
+    with database.session() as session:
+        repo = AgentRepository(session)
+        for index in range(1, 9):
+            repo.add_message(
+                thread_id="t1",
+                user_seq=index,
+                message_type=MessageType.ASSISTANT,
+                content_json=heavy_text(index).content_json,
+                langchain_message_id=f"a-{index}",
+            )
+
+    engine = ContextEngine(database, settings, DeterministicSummarizer())
+    assert engine.usage("t1").working_tokens > settings.working_trigger
+
+    result = engine.compact_if_needed("t1")
+    assert result.l0_blocks_created > 0, "剪不出余量就该压缩，而不是停在线下等着下轮再剪"
+    assert engine.usage("t1").working_tokens <= settings.working_trigger

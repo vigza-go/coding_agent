@@ -13,6 +13,7 @@ from ..persistence.models import Message, WorkStateSnapshot
 from ..persistence.repository import AgentRepository
 from .cover import ContextPiece, greedy_cover
 from .records import MemoryBlockSnapshot, MessageSnapshot, WorkStateView
+from .work_state import render
 
 
 class ContextCacheInvariantError(RuntimeError):
@@ -25,6 +26,11 @@ class ThreadContextState:
     selected_blocks: list[MemoryBlockSnapshot] = field(default_factory=list)
     working_messages: list[MessageSnapshot] = field(default_factory=list)
     work_state: WorkStateView | None = None
+    # 便签：剪裁/压缩把投影弄断的那一刻，顺手把最新 work_state 正文贴在这里。
+    # 它是**派生视图**（不落库、不进 messages/memory_blocks，也不是一条真消息），平日原样
+    # 冻着，只有剪裁那条路径会刷新它——这样两次剪裁之间投影逐字节不变、缓存全中。存渲染好
+    # 的正文而不是 MessageSnapshot：它没有真实 id，本就不是消息，别给它编字段。
+    pin_work_state: str | None = None
 
     def pieces(self) -> list[ContextPiece]:
         pieces = [
@@ -38,6 +44,16 @@ class ThreadContextState:
             )
             for block in self.selected_blocks
         ]
+        if self.pin_work_state is not None:
+            # 贴在压缩块之后、原文之前：投影是 [压缩历史] + [当前备忘] + [原文]。
+            pieces.append(
+                ContextPiece(
+                    kind="work_state",
+                    begin_message_id=0,
+                    end_message_id=0,
+                    text=self.pin_work_state,
+                )
+            )
         if self.working_messages:
             pieces.append(
                 ContextPiece(
@@ -147,5 +163,12 @@ class ThreadContextCache:
             working_messages=working_messages,
             work_state=(
                 WorkStateView.from_model(work_state_row) if work_state_row is not None else None
+            ),
+            # 冷启动（重启/缓存失效）后便签得自己长回来：只要历史上压过块、且 work_state
+            # 有内容，就按最新快照重新渲染一版。冷启动本来就全量重编码，这一刻贴它不额外花钱。
+            pin_work_state=(
+                render(work_state_row.state_json)
+                if selected_blocks and work_state_row is not None and work_state_row.state_json
+                else None
             ),
         )

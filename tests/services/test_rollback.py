@@ -3,6 +3,7 @@ from __future__ import annotations
 from coding_agent.config import ContextSettings
 from coding_agent.context.engine import ContextEngine
 from coding_agent.context.summarizer import DeterministicSummarizer
+from coding_agent.context.work_state import render
 from coding_agent.persistence.models import MemoryBlock, MessageType
 from coding_agent.persistence.repository import AgentRepository
 from coding_agent.services.rollback import RollbackService
@@ -149,8 +150,10 @@ def test_context_rollback_invalidates_by_message_range_and_reuses_child(database
 
     assert result.deactivated_messages == 4
     assert result.work_state == {"step": 1}
-    assert len(result.rebuilt_pieces) == 1
+    # 撤销后有块的线程重新载入，投影是 [记忆块] + [便签]：便签跟着回滚后的状态走。
+    assert [piece.kind for piece in result.rebuilt_pieces] == ["memory", "work_state"]
     assert result.rebuilt_pieces[0].block_id == child1.id
+    assert result.rebuilt_pieces[1].text == render(result.work_state)
     with database.session() as session:
         assert session.get(MemoryBlock, child1.id).active is True
         assert session.get(MemoryBlock, child2.id).active is False

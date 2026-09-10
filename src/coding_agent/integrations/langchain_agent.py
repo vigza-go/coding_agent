@@ -70,11 +70,14 @@ def build_summary_model(settings: Settings) -> ChatAnthropic:
 def make_work_state_tool(context_engine: ContextEngine):
     @tool("work_state", parse_docstring=True)
     def work_state(op: str, key: str = "", value: str = "") -> str:
-        """对当前工作状态做一次字典操作；状态是 {键: markdown 字符串} 的扁平结构。
+        """我的备忘录：一个 {键: markdown 字符串} 的扁平字典，用来跨轮记住东西。
 
-        一次调用只付一个键的成本，不要为了改一行而重打整份状态。键名以 ``!``
-        开头表示钉住（常驻注入）。值用 markdown，不要传嵌套结构。常见用法是
-        ``append`` 往一个键追加一条 bullet。
+        适合放用户偏好、已确认的事实、踩过的坑、临时约束这类跨轮还要用的信息。
+        内容**不会每轮自动出现**，需要回顾时用 ``list`` / ``get`` 主动翻；一旦历史被
+        剪裁或压缩，框架会把最新一版作为便签贴到上下文最前面提醒，所以正常情况下写完
+        不用担心它丢。一次调用只付一个键的成本，不要为了改一行而重打整份状态；值用
+        markdown，不要传嵌套结构。常见用法是 ``append`` 追加一条 bullet。保持克制——
+        它是备忘录，不是所有东西的家。
 
         Args:
             op: 操作名，取 list / get / set / append / delete / clear。

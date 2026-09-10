@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, RemoveMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from ..context.cover import ContextPiece
 from ..context.engine import ContextEngine
-from ..context.work_state import render, render_index
 from ..persistence.message_codec import decode_message_data
 
 
 class ContextProjectionService:
+    """把引擎选出的 pieces 投影成给模型的一串消息。
+
+    这里**不再每轮注入工作状态**：那会让一个频繁变化的东西占据提示词的最前面，一改就
+    断掉整条历史的缓存前缀。工作状态改由引擎在剪裁/压缩时贴成一条"便签"
+    （``ThreadContextState.pin_work_state``，见 ``context/engine.py``），随 pieces 一起
+    流进来，位置固定在压缩块之后、原文之前。
+    """
+
     def __init__(self, context_engine: ContextEngine) -> None:
         self.context_engine = context_engine
-        # 进程内记录"上一轮发给模型的是哪个快照"。工作状态每次写入都是新的一行、
-        # id 单调递增，所以比 id 就是精确判等，不需要 hash、也不加数据库列。
-        # 缓存失效或重启只会让它退化成"重新给一次全文"，方向是安全的。
-        self._sent_state_id: dict[str, int] = {}
 
     @staticmethod
     def render_pieces(pieces: list[ContextPiece]) -> list[BaseMessage]:
@@ -33,6 +36,16 @@ class ContextProjectionService:
                         ),
                     )
                 )
+            elif piece.kind == "work_state":
+                # 用 HumanMessage 而不是 SystemMessage：langchain_anthropic 会把
+                # SystemMessage 提到请求最前（system 字段），那就又回到"一改就断全前缀"
+                # 的老毛病了。这条只是系统侧背景，包在标签里、排在原文之前。
+                projected.append(
+                    HumanMessage(
+                        name="work_state",
+                        content=f"<current_work_state>\n{piece.text}\n</current_work_state>",
+                    )
+                )
             else:
                 projected.extend(decode_message_data(row.content_json) for row in piece.messages)
         return projected
@@ -41,22 +54,4 @@ class ContextProjectionService:
         self.context_engine.compact_if_needed(thread_id)
         pieces = self.context_engine.rebuild(thread_id)
         projected = self.render_pieces(pieces)
-        snapshot = self.context_engine.current_work_state(thread_id)
-        state_messages: list[BaseMessage] = []
-        if snapshot is not None:
-            body = (
-                render_index(snapshot.state_json)
-                if self._sent_state_id.get(thread_id) == snapshot.id
-                else render(snapshot.state_json)
-            )
-            self._sent_state_id[thread_id] = snapshot.id
-            # 工作状态是系统侧背景，不是用户本轮说的话。之前把它包成 HumanMessage 追加在
-            # 会话末尾，会让模型误以为末尾那段 <current_work_state> 是"最新用户指令"，把真正
-            # 的提问顶到前面。改为 SystemMessage 并放在最前，使对话以真实用户提问收尾。
-            state_messages.append(
-                SystemMessage(
-                    id=f"work-state-{snapshot.id}",
-                    content=f"<current_work_state>\n{body}\n</current_work_state>",
-                )
-            )
-        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *projected, *state_messages]
+        return [RemoveMessage(id=REMOVE_ALL_MESSAGES), *projected]
