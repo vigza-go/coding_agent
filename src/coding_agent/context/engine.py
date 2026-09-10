@@ -222,6 +222,8 @@ class ContextEngine:
         if working_tokens <= self.settings.working_trigger:
             return 0
 
+        before = working
+
         # 撑到线上才动，而且两种剪裁**一次做完**：剪裁会断前缀，触发一次付一次代价。分步碎剪
         # （这次剪思维链、下次剪工具结果）会把"断前缀"的次数翻倍——每次触发都改写投影，而缓存
         # 的代价取决于改动落在提示词多靠前的位置，不是改动大小。宁可在一次触发里多剪一点，也别
@@ -245,10 +247,18 @@ class ContextEngine:
         else:
             created = self._compact_prefix(state, working)
 
-        # 投影已经因为剪裁/压缩改变，这时候顺手把最新 work_state 贴成便签是搭便车，不额外多断
-        # 一次前缀。没超线的那条路径不碰便签，投影逐字节不变、缓存全中。
-        self._refresh_pin(state)
+        # 便签是搭便车的：只有这趟**真的改动了投影**才顺手刷新，否则连它都不碰，投影逐字节不变、
+        # 缓存全中。别写成"越线就刷新"——那是一条"什么都没动却断了前缀"的路径（比如越线了但没
+        # 冷草稿可剪、也切不出块），模型每写一次 work_state 就要付一次全段重编码。
+        if self._messages_changed(before, state.working_messages):
+            self._refresh_pin(state)
         return created
+
+    @staticmethod
+    def _messages_changed(before: list[MessageSnapshot], after: list[MessageSnapshot]) -> bool:
+        """按对象身份比：快照不可变，被剪过的消息一定是新对象。"""
+
+        return len(before) != len(after) or any(a is not b for a, b in zip(before, after))
 
     def _refresh_pin(self, state: ThreadContextState) -> None:
         """把便签刷成最新 work_state 正文；没有内容就清空它。

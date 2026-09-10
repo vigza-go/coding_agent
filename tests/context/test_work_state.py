@@ -244,3 +244,28 @@ def test_pin_refreshes_at_the_next_trim_not_on_every_write(database):
     engine.append_messages("t1", add_messages(database, "t1", 12, offset=30))  # 再顶过线
     refreshed = ContextProjectionService(engine).build("t1")
     assert "第二版" in pin_text(refreshed), "下一次剪裁/压缩时，便签换成最新一版"
+
+
+def test_pin_is_not_refreshed_when_the_pass_changed_nothing(database):
+    """越线了，但什么都没改动（没冷草稿、没旧工具结果、也切不出块）——便签不该换新。
+
+    否则这条路上每次都要白断一次前缀，等于把便签降级成"写完就刷"。
+    """
+
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"goal": "第一版"})
+    ContextProjectionService(make_engine(database, **COMPACT)).build("t1")  # 压出块 + 便签
+
+    # 换个"尾部比例接近 1"的引擎：同样越线，但切不出块、也没有可剪的东西。
+    engine = make_engine(
+        database,
+        total_tokens=2000,
+        working_trigger_ratio=0.5,
+        recent_tail_ratio=0.99,
+        summary_concurrency=1,
+    )
+    projection = ContextProjectionService(engine)
+    assert "第一版" in pin_text(projection.build("t1")), "冷启动先把便签长回来"
+
+    engine.mutate_work_state("t1", 2, "set", "goal", "第二版")
+    assert "第一版" in pin_text(projection.build("t1")), "白过一遍不得动便签"
