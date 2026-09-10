@@ -4,6 +4,7 @@ import os
 import signal
 from contextlib import contextmanager
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import Mock
@@ -14,6 +15,7 @@ from rich.console import Console
 
 from coding_agent.application import TurnExecutionError
 from coding_agent.config import Settings, TUISettings
+from coding_agent.integrations.agents_md import LoadedRuleFile
 from coding_agent.services.progress import TurnEvent, TurnEventKind
 from coding_agent.services.rollback import RollbackPreview, RollbackResult
 from coding_agent.services.usage import RecentUsage
@@ -336,3 +338,82 @@ def test_clear_command_on_an_empty_thread_does_nothing(monkeypatch):
     assert asked == []
     assert app.clear_context.call_count == 0
     assert "没有可清空的上下文" in output.getvalue()
+
+
+def test_status_keeps_the_checkbox_of_finished_items(monkeypatch):
+    """`[x]` 会被 rich 当标记吃掉，勾选符号就没了——只吃小写字母开头的，所以只有 completed 中招。"""
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.thread_status.return_value = status_snapshot(
+        todos=[
+            {"id": "t1", "title": "已经做完的事", "status": "completed"},
+            {"id": "t2", "title": "正在做的事", "status": "in_progress"},
+        ]
+    )
+
+    ui._show_status()
+
+    printed = output.getvalue()
+    assert "- [x] t1 已经做完的事" in printed
+    assert "- [~] t2 正在做的事" in printed
+
+
+def test_status_shows_model_text_as_written(monkeypatch):
+    """模型写的标题里带方括号也照原样显示：这里是显示层，不是标记层。"""
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.thread_status.return_value = status_snapshot(
+        todos=[{"id": "t1", "title": "改 list[tuple[str, str]] 的注解", "status": "pending"}],
+        work_state={"坑": "rich 会吃掉 [x]，比如 list[a, b]"},
+    )
+
+    ui._show_status()
+
+    printed = output.getvalue()
+    assert "list[tuple[str, str]]" in printed
+    assert "rich 会吃掉 [x]" in printed
+
+
+def status_snapshot(**overrides):
+    values = {
+        "thread_id": "t1",
+        "active_head_seq": 1,
+        "next_user_seq": 2,
+        "memory_levels": (),
+        "memory_tokens": 0,
+        "memory_limit": 1000,
+        "working_messages": 0,
+        "working_tokens": 0,
+        "working_trigger": 500,
+        "bash_enabled": True,
+        "search_enabled": False,
+        "work_state": None,
+        "todos": None,
+        "rule_files": (),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_status_lists_the_rule_files_that_were_injected(monkeypatch):
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.thread_status.return_value = status_snapshot(
+        rule_files=(LoadedRuleFile(path=Path("/home/me/.coding_agent/AGENTS.md"), tokens=320),)
+    )
+
+    ui._show_status()
+
+    printed = output.getvalue()
+    assert "/home/me/.coding_agent/AGENTS.md" in printed
+    assert "320t" in printed, "体积也要给，否则不知道离上限还有多远"
+
+
+def test_status_says_so_when_no_rule_file_is_in_play(monkeypatch):
+    """没有规则文件是常态，但得说出来——不然"到底加载没有"只能靠猜。"""
+
+    ui, app, output, _ = make_ui(monkeypatch)
+    app.thread_status.return_value = status_snapshot()
+
+    ui._show_status()
+
+    assert "无（全局与项目 AGENTS.md 都没有）" in output.getvalue()

@@ -307,6 +307,7 @@ class ContextEngine:
         state.pin_work_state = render_pin(
             state.todos.items if state.todos is not None else None,
             state.work_state.state_json if state.work_state is not None else None,
+            state_budget_tokens=self.settings.pin_state_budget_tokens,
         )
 
     def _compact_prefix(self, state: ThreadContextState, working: list[MessageSnapshot]) -> int:

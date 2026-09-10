@@ -26,7 +26,7 @@ from ..services.message_persistence import MessagePersistenceService
 from ..services.tool_execution import ToolExecutionService
 from ..workspace.artifacts import ArtifactStore
 from ..workspace.file_undo import FileMutationRecorder
-from .agents_md import load_agents_md
+from .agents_md import AgentsMd, load_agents_md
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
 from .search import SearchClient
@@ -175,12 +175,16 @@ def shared_agent_tools(
     bash_executor: BashExecutionService | None,
     search_client: SearchClient | None,
     extra_tools: list[Any] | None = None,
+    agents_md: AgentsMd | None = None,
 ) -> tuple[list[Any], str]:
     """组装父/子共用的工具面：work_state +（可选）bash +（可选）search + 额外工具。
 
     返回工具表和一段拼进 system_prompt 的说明（AGENTS.md 规则 + bash 说明）。抽出来是为了
     父子走同一份实现，不搞两套；子代理只是不传 ``extra_tools``（拿不到 ``run_subagent``，
     防止再套娃）。规则文件也在这里读：一次装配读一次，此后进程内不再变。
+
+    父进程会把自己那份 ``agents_md`` 传进来（``/status`` 要显示的就是同一份，不能让提示词
+    和面板各说各话）；不传就自己读——子代理是另一个进程，读自己那份。
     """
 
     tools: list[Any] = [make_work_state_tool(context_engine), make_todo_tool(context_engine)]
@@ -200,7 +204,8 @@ def shared_agent_tools(
         if search_client is None:
             raise RuntimeError("search is enabled but no SearchClient was provided")
         tools.append(make_search_tool(search_client))
-    return tools, load_agents_md(settings).text + bash_prompt
+    rules = agents_md if agents_md is not None else load_agents_md(settings)
+    return tools, rules.text + bash_prompt
 
 
 def _make_run_subagent_tool(settings: Settings, jobs: SubAgentJobs) -> Any:
@@ -266,6 +271,7 @@ def create_langchain_agent(
     bash_executor: BashExecutionService | None,
     search_client: SearchClient | None,
     jobs: SubAgentJobs,
+    agents_md: AgentsMd | None = None,
 ) -> Generator[Any, None, None]:
     runtime_middleware = AgentRuntimeMiddleware(
         persistence=MessagePersistenceService(database, context_engine),
@@ -293,6 +299,7 @@ def create_langchain_agent(
         bash_executor=bash_executor,
         search_client=search_client,
         extra_tools=extra_tools,
+        agents_md=agents_md,
     )
 
     # 不配置 checkpointer：应用库的 messages 表才是唯一真相源。AgentRuntimeMiddleware.before_model

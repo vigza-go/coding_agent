@@ -4,7 +4,15 @@ import json
 
 import pytest
 
-from coding_agent.config import TUISettings, load_settings
+from coding_agent.config import ContextSettings, TUISettings, load_settings
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+def test_the_pin_budget_must_be_positive(budget):
+    """便签里工作状态那一段的上限：0 或负数会让便签永远只剩一行提示，等于把笔记本关了。"""
+
+    with pytest.raises(ValueError, match="pin_state_budget_tokens"):
+        ContextSettings(pin_state_budget_tokens=budget)
 
 
 def test_bash_is_enabled_by_default(monkeypatch, tmp_path):

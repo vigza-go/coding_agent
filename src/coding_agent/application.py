@@ -14,6 +14,7 @@ from .context.engine import ContextEngine
 from .context.summarizer import LangChainSummarizer
 from .context.todo import open_items
 from .context.todo import render as todo_render
+from .integrations.agents_md import LoadedRuleFile, load_agents_md
 from .integrations.langchain_agent import build_model, build_summary_model, create_langchain_agent
 from .integrations.middleware import RunContext
 from .integrations.search import make_search_client
@@ -59,6 +60,7 @@ class ThreadStatus:
     search_enabled: bool
     work_state: dict[str, Any] | None
     todos: list[dict[str, Any]] | None = None
+    rule_files: tuple[LoadedRuleFile, ...] = ()
 
 
 class TurnExecutionError(RuntimeError):
@@ -92,6 +94,7 @@ class AgentApplication:
         recorder: FileMutationRecorder,
         bash_executor: BashExecutionService | None = None,
         subagent_jobs: Any = None,
+        rule_files: tuple[LoadedRuleFile, ...] = (),
     ) -> None:
         self.settings = settings
         self.database = database
@@ -99,6 +102,9 @@ class AgentApplication:
         self.recorder = recorder
         self.context_engine = context_engine
         self.bash_executor = bash_executor
+        # 启动时实际注入的那几份 AGENTS.md（不是"现在磁盘上有什么"）：/status 要显示的是
+        # 模型正在遵守的那一份，读盘再读一遍就可能与提示词里的内容不一致。
+        self.rule_files = rule_files
         # 外派的子代理登记处；本轮收工前靠它把报告等回来，None 表示功能未开。
         self.subagent_jobs = subagent_jobs
         self.message_persistence = MessagePersistenceService(database, context_engine)
@@ -364,6 +370,7 @@ class AgentApplication:
                 search_enabled=self.settings.agent.search_enabled,
                 work_state=snapshot.state_json if snapshot is not None else None,
                 todos=todo_snapshot.items_json if todo_snapshot is not None else None,
+                rule_files=self.rule_files,
             )
 
 
@@ -387,6 +394,9 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
     )
     search_client = make_search_client(settings.agent)
     jobs = SubAgentJobs(settings.artifact_dir)
+    # 规则文件在这里读、往下传：装配 Agent 用的和 /status 显示的是同一份对象，
+    # 免得"面板说加载了 A、提示词里其实是 B"。
+    rules = load_agents_md(settings)
     with create_langchain_agent(
         settings=settings,
         database=database,
@@ -396,6 +406,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
         bash_executor=bash_executor,
         search_client=search_client,
         jobs=jobs,
+        agents_md=rules,
     ) as agent:
         try:
             yield AgentApplication(
@@ -406,6 +417,7 @@ def create_application(settings: Settings) -> Generator[AgentApplication, None, 
                 recorder,
                 bash_executor,
                 subagent_jobs=jobs,
+                rule_files=rules.files,
             )
         finally:
             # 会话退出即放锁。进程被强杀时不用管：锁随连接被服务端收回。

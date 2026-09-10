@@ -50,10 +50,41 @@ def ordered(state: dict[str, Any]) -> list[tuple[str, str]]:
     return sorted(flatten(state).items())
 
 
-def render(state: dict[str, Any]) -> str:
-    """完整正文渲染。"""
+def render(state: dict[str, Any], *, budget_tokens: int | None = None) -> str:
+    """完整正文渲染；给了预算就按预算裁（见 :func:`_fit`）。"""
 
-    return "\n\n".join(f"## {key}\n{text}" for key, text in ordered(state))
+    entries = ordered(state)
+    body = "\n\n".join(f"## {key}\n{text}" for key, text in entries)
+    if budget_tokens is None or estimate_tokens(body) <= budget_tokens:
+        return body
+    return _fit(entries, budget_tokens)
+
+
+def _dropped_note(keys: list[str]) -> str:
+    listed = "、".join(keys)
+    return f"（便签放不下，另有 {len(keys)} 个键没贴：{listed}；用 list / get 查原文）"
+
+
+def _fit(entries: list[tuple[str, str]], budget: int) -> str:
+    """按预算往里塞键，塞不下的**整键**丢掉，并在正文里写清楚丢了哪些。
+
+    整键丢而不是从中间截断：半个 markdown 片段比没有更糟（读的人不知道下面还有没有），
+    而键名至少说清"这东西在，去 get 一下"。提示必须留在正文里——看不见的缺失才是真的缺失。
+    丢的次序就是渲染次序（按键名排序），所以同一份状态每次裁出来的结果逐字节相同。
+    """
+
+    kept: list[tuple[str, str]] = []
+    for index, (key, text) in enumerate(entries):
+        body = "\n\n".join(f"## {name}\n{value}" for name, value in [*kept, (key, text)])
+        if estimate_tokens(f"{body}\n\n{_dropped_note([n for n, _ in entries[index:]])}") > budget:
+            break
+        kept.append((key, text))
+
+    dropped = [key for key, _ in entries[len(kept) :]]
+    if not dropped:
+        return "\n\n".join(f"## {key}\n{text}" for key, text in kept)
+    body = "\n\n".join(f"## {key}\n{text}" for key, text in kept)
+    return f"{body}\n\n{_dropped_note(dropped)}" if body else _dropped_note(dropped)
 
 
 def _require_key(op: str, key: str | None) -> str:

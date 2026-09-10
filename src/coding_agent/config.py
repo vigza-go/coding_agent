@@ -26,6 +26,10 @@ class ContextSettings:
     recent_tool_interactions: int = 10
     tool_result_inline_tokens: int = 5_000
     reasoning_retain_ratio: float = 0.15
+    # 便签里"工作状态"那一段的 token 上限（计划那一段不裁，它本身有界）。这是保险丝不是日常
+    # 约束：工作状态是 agent 自己的笔记本，长到几万 token 时每贴一次便签都要白花一次钱，超了
+    # 就按整键丢掉几个键，并在正文里写清楚丢了哪些——让模型知道"那东西在，去 get"。
+    pin_state_budget_tokens: int = 4_000
 
     def __post_init__(self) -> None:
         ratios = {
@@ -50,6 +54,8 @@ class ContextSettings:
             raise ValueError("recent_tool_interactions must be non-negative")
         if not 0 < self.reasoning_retain_ratio < 1:
             raise ValueError("reasoning_retain_ratio must be between 0 and 1")
+        if self.pin_state_budget_tokens < 1:
+            raise ValueError("pin_state_budget_tokens must be positive")
 
     @property
     def compression_limit(self) -> int:

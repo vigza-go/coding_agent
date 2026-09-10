@@ -13,6 +13,7 @@ from coding_agent.application import AgentApplication, TurnExecutionError
 from coding_agent.config import ContextSettings, Settings
 from coding_agent.context.engine import ContextEngine
 from coding_agent.context.summarizer import DeterministicSummarizer
+from coding_agent.integrations.agents_md import LoadedRuleFile
 from coding_agent.persistence.message_codec import decode_message
 from coding_agent.persistence.models import Message
 from coding_agent.services.context_projection import ContextProjectionService
@@ -150,7 +151,7 @@ class StubJobs:
         self.terminated += 1
 
 
-def _app(database, tmp_path, agent, jobs=None):
+def _app(database, tmp_path, agent, jobs=None, **overrides):
     engine = ContextEngine(database, ContextSettings(), DeterministicSummarizer())
     return AgentApplication(
         Settings(workspace_root=tmp_path),
@@ -159,7 +160,17 @@ def _app(database, tmp_path, agent, jobs=None):
         engine,
         FileMutationRecorder(database, tmp_path),
         subagent_jobs=jobs,
+        **overrides,
     )
+
+
+def test_thread_status_carries_the_rule_files_that_were_injected(database, tmp_path):
+    """面板要显示"启动时注入了哪几份"，不是"现在磁盘上有什么"。"""
+
+    rules = (LoadedRuleFile(path=tmp_path / "AGENTS.md", tokens=42),)
+    app = _app(database, tmp_path, ScriptedAgent("ok"), rule_files=rules)
+
+    assert app.thread_status("t1").rule_files == rules
 
 
 def test_subagent_reports_are_collected_inside_the_same_turn(database, tmp_path):

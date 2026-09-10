@@ -7,7 +7,9 @@ from langchain_core.messages import HumanMessage
 
 from coding_agent.config import ContextSettings
 from coding_agent.context.engine import ContextEngine
+from coding_agent.context.pin import render_pin
 from coding_agent.context.summarizer import DeterministicSummarizer
+from coding_agent.context.tokens import estimate_tokens
 from coding_agent.context.work_state import (
     MAX_KEY_CHARS,
     WorkStateError,
@@ -335,3 +337,79 @@ def test_the_plan_reaches_the_pin_at_the_next_trim_and_survives_a_cold_start(dat
 
     engine.invalidate("t1")  # 重启/缓存失效
     assert "第二版" in pin_text(projection.build("t1")), "冷启动按最新快照重新渲染便签"
+
+
+# --------------------------------------------------------------------- 封顶：只砍工作状态那一段
+
+
+def budget_that_fits_only(key: str, state: dict) -> int:
+    return estimate_tokens(render({key: state[key]})) + 80
+
+
+def test_render_drops_whole_keys_and_says_which():
+    state = {"a": "甲" * 200, "b": "乙" * 200, "c": "丙" * 200}
+
+    body = render(state, budget_tokens=budget_that_fits_only("a", state))
+
+    assert "## a" in body and "## b" not in body and "## c" not in body
+    assert "2 个键没贴：b、c" in body and "get" in body, "丢了什么必须写在正文里"
+
+
+def test_render_is_byte_stable_with_and_without_a_budget():
+    """同一份状态每次裁出来必须一模一样，否则两次剪裁之间投影会白变一次。"""
+
+    state = {"a": "甲" * 200, "b": "乙" * 200}
+    budget = budget_that_fits_only("a", state)
+
+    assert render(state, budget_tokens=budget) == render(state, budget_tokens=budget)
+    assert "## b" in render(state), "不给预算就是原文，一个键都不许动"
+    assert "## b" in render(state, budget_tokens=10_000)
+
+
+def test_a_budget_that_just_fits_keeps_every_key():
+    """刚好够就该一个都不丢——预算里多留的那点只能是"要写提示"要占的地方。"""
+
+    state = {"a": "甲" * 100, "b": "乙" * 100}
+
+    assert render(state, budget_tokens=estimate_tokens(render(state))) == render(state)
+
+
+def test_one_token_under_the_wall_starts_dropping_from_the_end():
+    state = {"a": "甲" * 100, "b": "乙" * 100}
+
+    body = render(state, budget_tokens=estimate_tokens(render(state)) - 1)
+
+    assert "## a" in body and "## b" not in body
+    assert "1 个键没贴：b" in body
+
+
+def test_a_budget_that_fits_nothing_still_tells_what_is_missing():
+    body = render({"a": "甲" * 200, "b": "乙" * 200}, budget_tokens=1)
+
+    assert body.startswith("（便签放不下")
+    assert "a、b" in body, "一个键都没贴出来，也得说清少了哪些"
+
+
+def test_the_plan_is_never_truncated():
+    """计划是每一步都要照它走的指针：预算只卡工作状态，砍掉一半的清单比体积超标糟得多。"""
+
+    todos = [
+        {"id": "1", "title": "读代码", "status": "pending"},
+        {"id": "2", "title": "改代码", "status": "in_progress"},
+    ]
+
+    text = render_pin(todos, {"a": "甲" * 400}, state_budget_tokens=20)
+
+    assert text is not None
+    assert "- [~] 2 改代码" in text and "- [ ] 1 读代码" in text
+    assert "没贴" in text, "被砍的是工作状态那一段"
+
+
+def test_the_pin_budget_comes_from_settings(database):
+    add_messages(database, "t1", 30)
+    save_state(database, "t1", 1, {"a": "甲" * 400, "b": "乙" * 400})
+
+    engine = make_engine(database, **dict(COMPACT, pin_state_budget_tokens=200))
+    text = pin_text(ContextProjectionService(engine).build("t1"))
+
+    assert "没贴" in text, "引擎得把配置里的上限传给便签"

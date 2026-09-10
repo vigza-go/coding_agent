@@ -6,10 +6,13 @@ import os
 import signal
 import sys
 import threading
+from collections.abc import Sequence
 from html import escape as html_escape
 from time import monotonic, sleep
+from typing import Any
 
 from prompt_toolkit import HTML, PromptSession
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
@@ -23,6 +26,7 @@ from rich.text import Text
 from ..application import AgentApplication, TurnExecutionError, create_application
 from ..config import load_settings
 from ..context.todo import render as todo_render
+from ..integrations.agents_md import LoadedRuleFile
 from ..integrations.desktop import DesktopService
 from ..persistence.thread_lock import ThreadBusyError
 from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
@@ -41,6 +45,32 @@ HELP = """可用命令：
   /exit          退出
 
 输入：Enter 发送，Alt+Enter 插入换行，方向键浏览本次启动中的输入历史。"""
+
+
+def _hud_plan(todos: list[dict[str, Any]] | None) -> str:
+    """底栏里那一小段计划进度；没有计划就整段不要（宁缺毋滥）。
+
+    计划表可能是模型手写的，字段缺了就当作没写，别在这儿炸——这里只是显示。
+    """
+
+    items = [item for item in todos or [] if isinstance(item, dict)]
+    if not items:
+        return ""
+
+    def field(item: dict[str, Any], name: str) -> str:
+        return str(item.get(name) or "")
+
+    def short(text: str, limit: int = 24) -> str:
+        return text if len(text) <= limit else f"{text[:limit]}…"
+
+    settled = sum(1 for item in items if field(item, "status") in {"completed", "cancelled"})
+    current = next((item for item in items if field(item, "status") == "in_progress"), None)
+    if current is not None:
+        tail = f"进行中 {short(field(current, 'title'))}"
+    else:
+        following = next((item for item in items if field(item, "status") == "pending"), None)
+        tail = f"下一步 {short(field(following, 'title'))}" if following is not None else "全部完成"
+    return f"计划 {settled}/{len(items)} · {tail}"
 
 
 def _input_bindings() -> KeyBindings:
@@ -98,6 +128,51 @@ class TerminalUI:
             multiline=True,
             key_bindings=_input_bindings(),
         )
+        # 底栏显示的内容（formatted text）：在回合边界算一次，回调只负责交出去。
+        self._hud: StyleAndTextTuples = []
+        # 计划段（纯文本）：底栏和回合中的进度行共用同一份，别为了显示多查一次库。
+        self._plan_now = ""
+
+    def _refresh_hud(self) -> None:
+        """把底栏那一行算好。
+
+        `bottom_toolbar` 传的是回调，**每敲一个键都会被调一次**，而这里一次要跑几条 SQL 加一遍
+        用量统计——所以只在回合边界（每次回到输入框之前）算一次，回调里不查任何东西。
+        """
+
+        try:
+            status = self.app.thread_status(self.thread_id)
+            head = (
+                f" {self.thread_id}  ·  head {status.active_head_seq}   "
+            )
+            plan = _hud_plan(status.todos)
+        except Exception as error:  # noqa: BLE001 - 显示层出问题不该把整场会话带走
+            # 读状态和渲染都在这个 guard 里：只包住前者的话，渲染一炸整场会话就没了。
+            # 但也别假装没事——看不见的失败比难看的失败糟得多，错因直接印在底栏上。
+            self._hud = [("ansired", f" 状态不可用：{type(error).__name__} ")]
+            return
+
+        self._plan_now = plan
+        self._hud = (
+            [("ansibrightblack", f"{head} · "), ("ansicyan", f"{plan}  ")]
+            if plan
+            else [("ansibrightblack", head)]
+        )
+
+    def _busy(self, text: str) -> str:
+        """回合进行中那行进度：动作 + 计划进度。
+
+        回车之后底栏会跟着输入框一起消失（它俩是同一个 prompt 界面），整轮跑完才回来，
+        所以"现在做到哪一步"得挂在这行上——它才是回合里唯一在屏幕上的东西。
+        """
+
+        plan = f" [bright_black]· {markup_escape(self._plan_now)}[/bright_black]" if self._plan_now else ""
+        return f"[cyan]{text}[/cyan]{plan}"
+
+    def _toolbar(self) -> StyleAndTextTuples:
+        # 注解必须用 prompt_toolkit 的别名：`list[tuple[str, str]]` 看着一样，但 list 是不变的，
+        # 它接不到 `list[OneStyleAndTextTuple]`（= list[str | tuple[str, str]]）上去，Pylance 会红。
+        return self._hud
 
     def run(self) -> None:
         self.console.print(
@@ -112,6 +187,7 @@ class TerminalUI:
         # 进入即占用：这条轨道里已经有别的会话（哪怕它正闲着不说话）就不启动。
         self.app.enter_thread(self.thread_id)
         while True:
+            self._refresh_hud()  # 回合边界：上一轮/上一条命令留下的 seq 与计划都变了
             try:
                 text = self.session.prompt(
                     HTML(
@@ -119,7 +195,8 @@ class TerminalUI:
                         f" <ansibrightblack>· {html_escape(self.thread_id)}</ansibrightblack> › "
                     ),
                     prompt_continuation="… ",
-                    bottom_toolbar=" Enter 发送 · Alt+Enter 换行 · Ctrl-D 退出 ",
+                    # 按键提示启动时已经印过一遍，底栏让给实时状态（见 _refresh_hud）。
+                    bottom_toolbar=self._toolbar,
                 ).strip()
             except KeyboardInterrupt:
                 self.console.print("[dim]已清空当前输入。[/dim]")
@@ -237,7 +314,9 @@ class TerminalUI:
 
     def _run_turn(self, text: str) -> None:
         started_at = monotonic()
-        with self.console.status("[cyan]正在准备上下文…[/cyan]", spinner="dots") as status:
+        with self.console.status(
+            self._busy("正在准备上下文…"), spinner="dots"
+        ) as status:
             event_gate = TurnEventGate(lambda event: self._render_event(status, event))
             failure: TurnExecutionError | None = None
             try:
@@ -313,27 +392,33 @@ class TerminalUI:
 
     def _render_event(self, status: Status, event: TurnEvent) -> None:
         if event.kind == TurnEventKind.MODEL_STARTED:
-            status.update("[cyan]模型思考中…[/cyan]")
+            status.update(self._busy("模型思考中…"))
         elif event.kind == TurnEventKind.MODEL_FINISHED:
             if event.text:
                 self._print_agent_text(event.text)
-            status.update("[cyan]正在处理模型结果…[/cyan]")
+            status.update(self._busy("正在处理模型结果…"))
         elif event.kind == TurnEventKind.TOOL_STARTED:
             detail = f" [dim]{markup_escape(event.detail)}[/dim]" if event.detail else ""
             self.console.print(f"[blue]→[/blue] {markup_escape(event.name or 'tool')}{detail}")
-            status.update(f"[cyan]正在执行 {markup_escape(event.name or 'tool')}…[/cyan]")
+            status.update(self._busy(f"正在执行 {markup_escape(event.name or 'tool')}…"))
         elif event.kind == TurnEventKind.TOOL_FINISHED:
             self.console.print(f"[green]✓[/green] {markup_escape(event.name or 'tool')}")
-            status.update("[cyan]正在处理工具结果…[/cyan]")
+            if event.name == "todo":
+                # 计划一变就把进度行换成新进度：这是唯一"每一步都要照它走"的东西，
+                # 别让它等到整轮跑完才在底栏里露面（那时模型早走远了）。
+                self._refresh_hud()
+                status.update(self._busy("计划已更新"))
+            else:
+                status.update(self._busy("正在处理工具结果…"))
         elif event.kind == TurnEventKind.TOOL_FAILED:
             self.console.print(
                 f"[red]✗[/red] {markup_escape(event.name or 'tool')} "
                 f"[dim]{markup_escape(event.detail or '')}[/dim]"
             )
         elif event.kind == TurnEventKind.SUMMARY_STARTED:
-            status.update(f"[cyan]正在压缩记忆 {markup_escape(event.name or '')}…[/cyan]")
+            status.update(self._busy(f"正在压缩记忆 {markup_escape(event.name or '')}…"))
         elif event.kind == TurnEventKind.SUMMARY_FINISHED:
-            status.update("[cyan]继续处理…[/cyan]")
+            status.update(self._busy("继续处理…"))
             self.console.print(f"[dim]✓ 记忆 {markup_escape(event.name or '')} 压缩完成[/dim]")
 
     def _show_history(self, limit: int) -> None:
@@ -393,6 +478,7 @@ class TerminalUI:
             "搜索工具",
             Text("已启用", style="yellow") if status.search_enabled else Text("未启用", style="dim"),
         )
+        conversation.add_row("规则文件", self._rule_files(status.rule_files))
         self.console.print(Panel(conversation, title="会话", title_align="left"))
 
         context = Table(show_header=False, box=None, padding=(0, 2))
@@ -411,7 +497,9 @@ class TerminalUI:
         self.console.print(Panel(context, title="上下文", title_align="left"))
         self.console.print(
             Panel(
-                todo_render(status.todos) if status.todos else "（没有计划）",
+                # 模型写的字一律用 Text 包住、不给 rich 当标记解析：`[x]` 会被它吃掉（它只认小写
+                # 字母 / `#` / `/` / `@` 开头的方括号），于是勾选符号连同 `list[foo]` 一起消失。
+                Text(todo_render(status.todos)) if status.todos else Text("（没有计划）", style="dim"),
                 title="计划",
                 title_align="left",
             )
@@ -421,11 +509,28 @@ class TerminalUI:
         else:
             self.console.print(
                 Panel(
-                    json.dumps(status.work_state, ensure_ascii=False, indent=2),
+                    Text(json.dumps(status.work_state, ensure_ascii=False, indent=2)),
                     title="work state",
                     title_align="left",
                 )
             )
+
+    @staticmethod
+    def _rule_files(files: Sequence[LoadedRuleFile]) -> Text:
+        """启动时真正注进去的那几份规则；没有就是没有，不假装。
+
+        显示的是**启动时注入的清单**，不是"现在磁盘上有什么"——规则文件改动要重启进程才生效，
+        面板要是读盘再看一遍，就会和模型正在遵守的内容对不上。
+        """
+
+        if not files:
+            return Text("无（全局与项目 AGENTS.md 都没有）", style="dim")
+        # 一行一份、超宽就折行：路径长起来被按宽度截掉的话，恰好把 token 数截没了。
+        return Text(
+            "\n".join(f"{item.path}（{item.tokens}t）" for item in files),
+            style="dim",
+            overflow="fold",
+        )
 
     def _show_usage(self, limit: int) -> None:
         usage = self.app.recent_usage(self.thread_id, limit=limit)

@@ -3,6 +3,7 @@
   "workspace_root": ".",
   "agents_md_path": "~/.coding_agent/AGENTS.md",
   "agents_md_limit_tokens": 15000,
+  "pin_state_budget_tokens": 4000,
   "llm": {
     "base_url": "https://api.deepseek.com/anthropic",
     "api_key": "use-the-LLM_API_KEY-environment-variable",

@@ -8,7 +8,7 @@
 技术栈：Python · LangGraph · LangChain · SQLAlchemy · MySQL · prompt-toolkit · Rich
 
 ```
-核心代码约 6.1k 行 ｜ 测试约 6.2k 行 / 280 个 pytest 用例
+核心代码约 6.3k 行 ｜ 测试约 6.7k 行 / 314 个 pytest 用例
 机制、不变量与推导见 DESIGN.md ｜ 怎么跑见 RUNBOOK.md ｜ 评测在 experiments/
 ```
 
@@ -28,13 +28,13 @@ TUI 命令：
 | --- | --- |
 | `/history [N]` | 查看最近 N 条有效消息（`/list` 为兼容别名） |
 | `/threads` / `/thread ID` | 列出会话 / 切换会话（目标正被别的会话跑 turn 时拒绝切换） |
-| `/status` | 轮次水位、记忆块层级时间线、压缩区与工作区 token 占用、最新一版工作状态 |
+| `/status` | 轮次水位、记忆块层级时间线、压缩区与工作区 token 占用、当前计划、生效的规则文件与最新一版工作状态 |
 | `/usage [N]` | 近期回复的 API 用量与 prompt 缓存命中率 |
 | `/undo [N]` | 预览并确认后撤销 `user_seq >= N` |
 | `/clear` | 确认后清空当前线程上下文（历史、压缩块、work state；**不改动文件**） |
 | `/help` `/exit` | 帮助 / 退出 |
 
-输入：Enter 发送，Alt+Enter 换行，方向键浏览本次进程内的输入历史。更细的排障与配置见 [RUNBOOK.md](./RUNBOOK.md)。
+输入：Enter 发送，Alt+Enter 换行，方向键浏览本次进程内的输入历史。输入框下面那行显示轮次水位与计划进度（`t1 · head 12 · next 13 · 计划 1/3 · 进行中 写代码`）；回车后它跟着输入框一起收掉，这一轮的进度就挂在进度行上（`正在执行 bash… · 计划 1/3 · 进行中 写代码`），模型每次写完计划刷新一次。都不花 token。更细的排障与配置见 [RUNBOOK.md](./RUNBOOK.md)。
 
 规则文件（可选）：全局 `~/.coding_agent/AGENTS.md`、项目根 `AGENTS.md`，启动时各读一次并常驻在提示词最前面，见 [DESIGN.md](./DESIGN.md)「跨会话规则」。
 
@@ -113,7 +113,7 @@ coding_agent/
 
 ## 测试与评测
 
-280 个 pytest 用例、约 6.2k 行，`uv run pytest -q` 用 SQLite 即可、无需外部数据库。覆盖方向：撤销与一致性、压缩（生成、同级合并、贪心覆盖、摘要失败不改缓存）、剪裁时机与工具窗口、工作状态便签与计划（合贴、冻结、冷启动）、计划工具（校验、整表替换、重复提交不落快照）、收尾软提醒、跨会话规则（两层顺序、超限报错、缺文件跳过、真拼进提示词）、并发与文件锁、协议补齐与幂等、Bash 边界、成本统计口径。另有 4 个与近期改动无关的既有失败（agent / subagent / tui×2）。
+314 个 pytest 用例、约 6.7k 行，`uv run pytest -q` 用 SQLite 即可、无需外部数据库。覆盖方向：撤销与一致性、压缩（生成、同级合并、贪心覆盖、摘要失败不改缓存）、剪裁时机与工具窗口、工作状态便签与计划（合贴、冻结、冷启动、便签封顶按整键丢）、计划工具（校验、整表替换、重复提交不落快照）、收尾软提醒、跨会话规则（两层顺序、超限报错、缺文件跳过、真拼进提示词、传入的那份不被磁盘覆盖）、底栏 HUD（各状态、长标题截断、回调不查库、坏状态不带走会话）、`/status` 面板原样显示模型写的字（`[x]` 不被 rich 吃掉）、并发与文件锁、协议补齐与幂等、Bash 边界、成本统计口径。另有 4 个与近期改动无关的既有失败（agent / subagent / tui×2）。
 
 对照评测在 `experiments/`：用 LongMemEval 的真实历史，比较分层摘要与滚动摘要各喂给摘要器多少 token。`lme_timeladder.py` 单题回放（顶部 `FAKE = True` 可零成本检查形状）、`batch.py` 批量选题并发、`report.py` 汇总；跑法与最近一次完整记录见 [experiments/README.md](experiments/README.md) 与 [EVAL_REPORT_2026-09-06.md](experiments/EVAL_REPORT_2026-09-06.md)。
 

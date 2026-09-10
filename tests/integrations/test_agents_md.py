@@ -152,3 +152,34 @@ def test_rules_are_injected_into_the_shared_prompt_suffix(tmp_path):
 
     assert "这个仓库的规矩" in prompt_suffix
     assert "work_state" in {t.name for t in tools}
+
+
+def test_the_passed_in_rules_win_over_the_disk(tmp_path):
+    """父进程传进来那份就是提示词里那份。
+
+    装配时再读一遍盘的话，`/status` 显示的和模型正在遵守的就可能对不上——规则文件改了要重启
+    才生效，面板不能偷偷看新版本。
+    """
+
+    from dataclasses import replace
+
+    from coding_agent.config import AgentSettings
+    from coding_agent.integrations.agents_md import AgentsMd
+    from coding_agent.integrations.langchain_agent import shared_agent_tools
+
+    settings = replace(
+        make_settings(tmp_path, project_text="磁盘上的旧规矩"),
+        agent=AgentSettings(bash_enabled=False, search_enabled=False),
+    )
+    injected = AgentsMd(text="\n<agents_md>\n启动时读进来的规矩\n</agents_md>\n", files=())
+
+    _tools, prompt_suffix = shared_agent_tools(
+        settings=settings,
+        context_engine=None,
+        bash_executor=None,
+        search_client=None,
+        agents_md=injected,
+    )
+
+    assert "启动时读进来的规矩" in prompt_suffix
+    assert "磁盘上的旧规矩" not in prompt_suffix
