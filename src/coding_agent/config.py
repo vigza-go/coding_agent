@@ -171,6 +171,10 @@ class Settings:
     database_url: str = "mysql+pymysql://root:root@127.0.0.1:3306/langchain?charset=utf8mb4"
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
     artifact_dir: Path = field(default_factory=lambda: Path.cwd() / ".artifacts")
+    # 跨会话规则文件（见 integrations/agents_md.py）。全局那份默认放在工具自己的配置目录下，
+    # 便于集中切换；项目那份固定是 workspace_root/AGENTS.md。启动读一次，合计超上限直接报错。
+    agents_md_path: Path = field(default_factory=lambda: Path.home() / ".coding_agent" / "AGENTS.md")
+    agents_md_limit_tokens: int = 15_000
     # 解析后的配置文件绝对路径。子代理是独立进程、cwd 可能不同，必须按这个绝对路径回读
     # 同一份配置，否则会像“在 workspace 里找不到 config.json”那样静默读成空配置。
     config_path: Path = field(default_factory=lambda: Path("config.json").resolve())
@@ -252,6 +256,19 @@ def load_settings(path: str | Path | None = None) -> Settings:
     artifact_dir = Path(
         os.getenv("ARTIFACT_DIR", raw.get("artifact_dir", workspace / ".artifacts"))
     ).resolve()
+    agents_md_path = Path(
+        os.getenv("AGENTS_MD_PATH")
+        or raw.get("agents_md_path")
+        or Path.home() / ".coding_agent" / "AGENTS.md"
+    ).expanduser().resolve()
+    agents_md_limit_tokens = int(
+        os.getenv(
+            "AGENTS_MD_LIMIT_TOKENS",
+            raw.get("agents_md_limit_tokens", Settings.agents_md_limit_tokens),
+        )
+    )
+    if agents_md_limit_tokens < 1:
+        raise ValueError("agents_md_limit_tokens must be positive")
     llm = LLMSettings(
         model=os.getenv("LLM_MODEL", llm_raw.get("model", LLMSettings.model)),
         api_key=os.getenv("LLM_API_KEY", llm_raw.get("api_key", "")),
@@ -290,6 +307,8 @@ def load_settings(path: str | Path | None = None) -> Settings:
         database_url=os.getenv("DATABASE_URL", raw.get("database_url", Settings.database_url)),
         workspace_root=workspace,
         artifact_dir=artifact_dir,
+        agents_md_path=agents_md_path,
+        agents_md_limit_tokens=agents_md_limit_tokens,
         config_path=resolved_config_path,
         llm=llm,
         summary_llm=summary_llm,

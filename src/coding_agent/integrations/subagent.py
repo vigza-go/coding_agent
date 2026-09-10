@@ -114,7 +114,7 @@ def build_subagent_graph(settings: Settings):
         if settings.agent.bash_enabled
         else None
     )
-    tools, bash_prompt = shared_agent_tools(
+    tools, prompt_suffix = shared_agent_tools(
         settings=settings,
         context_engine=context_engine,
         bash_executor=bash_executor,
@@ -151,7 +151,7 @@ def build_subagent_graph(settings: Settings):
         tools=tools,
         middleware=middleware,
         context_schema=RunContext,
-        system_prompt=SUBAGENT_SYSTEM_PROMPT + bash_prompt,
+        system_prompt=SUBAGENT_SYSTEM_PROMPT + prompt_suffix,
     )
     return graph
 

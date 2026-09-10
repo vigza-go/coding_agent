@@ -25,6 +25,7 @@ from ..services.message_persistence import MessagePersistenceService
 from ..services.tool_execution import ToolExecutionService
 from ..workspace.artifacts import ArtifactStore
 from ..workspace.file_undo import FileMutationRecorder
+from .agents_md import load_agents_md
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
 from .search import SearchClient
@@ -143,8 +144,9 @@ def shared_agent_tools(
 ) -> tuple[list[Any], str]:
     """组装父/子共用的工具面：work_state +（可选）bash +（可选）search + 额外工具。
 
-    返回工具表和一段拼进 system_prompt 的 bash 说明。抽出来是为了父子走同一份实现，
-    不搞两套；子代理只是不传 ``extra_tools``（拿不到 ``run_subagent``，防止再套娃）。
+    返回工具表和一段拼进 system_prompt 的说明（AGENTS.md 规则 + bash 说明）。抽出来是为了
+    父子走同一份实现，不搞两套；子代理只是不传 ``extra_tools``（拿不到 ``run_subagent``，
+    防止再套娃）。规则文件也在这里读：一次装配读一次，此后进程内不再变。
     """
 
     tools: list[Any] = [make_work_state_tool(context_engine)]
@@ -164,7 +166,7 @@ def shared_agent_tools(
         if search_client is None:
             raise RuntimeError("search is enabled but no SearchClient was provided")
         tools.append(make_search_tool(search_client))
-    return tools, bash_prompt
+    return tools, load_agents_md(settings).text + bash_prompt
 
 
 def _make_run_subagent_tool(settings: Settings, jobs: SubAgentJobs) -> Any:
@@ -251,7 +253,7 @@ def create_langchain_agent(
     extra_tools = (
         [_make_run_subagent_tool(settings, jobs)] if settings.agent.subagent_enabled else []
     )
-    tools, bash_prompt = shared_agent_tools(
+    tools, prompt_suffix = shared_agent_tools(
         settings=settings,
         context_engine=context_engine,
         bash_executor=bash_executor,
@@ -281,6 +283,6 @@ def create_langchain_agent(
               注意模仿用户的表达风格。
             """
             "文件工具路径与 bash 同规则：以 / 开头表示宿主机真实绝对路径，相对路径基于工作区根目录。"
-            f"{bash_prompt}"
+            f"{prompt_suffix}"
         ),
     )

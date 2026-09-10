@@ -407,13 +407,17 @@ def test_looping_child_brakes_at_model_limit_not_recursion_crash(database, tmp_p
     assert "模型调用上限" in result["messages"][-1].content
 
 
-def test_child_tool_surface_has_no_run_subagent():
+def test_child_tool_surface_has_no_run_subagent(tmp_path):
     """防套娃：子代理工具面里绝不含 run_subagent。"""
 
     from coding_agent.config import AgentSettings, Settings
     from coding_agent.integrations.langchain_agent import shared_agent_tools
 
-    settings = Settings(agent=AgentSettings(bash_enabled=False, search_enabled=False))
+    # 显式指向一个不存在的规则文件：装配会读 AGENTS.md，不该去读开发机自己那份。
+    settings = Settings(
+        agent=AgentSettings(bash_enabled=False, search_enabled=False),
+        agents_md_path=tmp_path / "AGENTS.md",
+    )
     tools, _ = shared_agent_tools(
         settings=settings,
         context_engine=None,  # 只建 work_state 工具，用不到 engine 实例

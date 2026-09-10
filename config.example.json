@@ -1,6 +1,8 @@
 {
   "database_url": "mysql+pymysql://root:password@127.0.0.1:3306/langchain?charset=utf8mb4",
   "workspace_root": ".",
+  "agents_md_path": "~/.coding_agent/AGENTS.md",
+  "agents_md_limit_tokens": 15000,
   "llm": {
     "base_url": "https://api.deepseek.com/anthropic",
     "api_key": "use-the-LLM_API_KEY-environment-variable",

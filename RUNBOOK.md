@@ -8,6 +8,9 @@
    只有一个数据库连接需要配置：应用不启用 LangGraph checkpointer，原因见 DESIGN.md「撤销」
    一节与下方排障条目。
 4. API key 建议只放在 `LLM_API_KEY` 环境变量。`config.json` 已被 Git 忽略。
+5. （可选）写规则文件：全局 `~/.coding_agent/AGENTS.md`、项目 `<workspace_root>/AGENTS.md`。
+   启动时各读一次、拼在提示词最前面；两份合计超过 `agents_md_limit_tokens`（默认 15k token）
+   直接报错，不截断。见 DESIGN.md「跨会话规则」。
 
 首次启动会通过 SQLAlchemy `create_all` 创建六张业务表。已有数据库启动时会执行幂等兼容迁移；旧版本的
 `memory_blocks.is_frontier` 字段及其索引会被删除，当前块集合改由 greedy cover 动态计算。
