@@ -13,6 +13,7 @@ from ..config import ContextSettings
 from ..persistence.database import Database
 from ..persistence.models import MemoryBlock, Message, TodoSnapshot, WorkStateSnapshot
 from ..persistence.repository import AgentRepository
+from ..workspace.images import image_references, preserve_image_references
 from .cache import ThreadContextCache, ThreadContextState
 from .compaction import (
     atomic_message_units,
@@ -243,9 +244,15 @@ class ContextEngine:
                     **message.content_json,
                     "data": {
                         **message.content_json["data"],
+                        "additional_kwargs": {
+                            k: v for k, v in message.content_json["data"].get(
+                                "additional_kwargs", {}).items() if k != "attachments"
+                        },
                         "content": (
                             "[较早的工具结果已从近期模型输入中剪裁；如需细节，"
                             "请重新读取文件或执行查询。]"
+                            + image_references(message.content_json["data"].get(
+                                "additional_kwargs", {}).get("attachments", []))
                         ),
                     },
                 }
@@ -380,6 +387,7 @@ class ContextEngine:
         source_tokens = sum(message_tokens(message) for message in chunk)
         hard_limit = max(1, math.floor(source_tokens * self.settings.summary_target_ratio))
         summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=0)
+        summary = preserve_image_references(source, summary)
         return chunk, summary, estimate_tokens(summary)
 
     def _merge_until_within_budget(self, state: ThreadContextState) -> int:
@@ -427,6 +435,7 @@ class ContextEngine:
             ),
         )
         summary = self.summarizer.summarize(source, hard_limit=hard_limit, level=left.level + 1)
+        summary = preserve_image_references(source, summary)
         with self.database.session() as session:
             repo = AgentRepository(session)
             repo.get_or_create_conversation(state.thread_id, lock=True)

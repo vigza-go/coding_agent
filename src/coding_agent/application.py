@@ -29,6 +29,7 @@ from .services.progress import ProgressCallbackHandler, TurnEvent
 from .services.rollback import RollbackPreview, RollbackResult, RollbackService
 from .services.usage import RecentUsage
 from .workspace.file_undo import FileMutationRecorder
+from .workspace.images import MAX_IMAGES, ImageStore, image_references
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,7 @@ class AgentApplication:
         thread_id: str,
         text: str,
         *,
+        attachments: list[dict] | None = None,
         on_event: Callable[[TurnEvent], None] | None = None,
     ) -> AIMessage | None:
         """跑一轮。thread 的占用是会话级的（进入时取得，退出才放），所以这里只是
@@ -129,7 +131,7 @@ class AgentApplication:
         """
 
         self.enter_thread(thread_id)
-        return self._run_turn_locked(thread_id, text, on_event=on_event)
+        return self._run_turn_locked(thread_id, text, attachments=attachments, on_event=on_event)
 
     def enter_thread(self, thread_id: str) -> None:
         """占用一条 thread，直到 :meth:`leave_thread`；正被别人占着就抛错。"""
@@ -144,12 +146,20 @@ class AgentApplication:
         thread_id: str,
         text: str,
         *,
+        attachments: list[dict] | None = None,
         on_event: Callable[[TurnEvent], None] | None = None,
     ) -> AIMessage | None:
+        if len(attachments or []) > MAX_IMAGES:
+            raise ValueError(f"每条消息最多附加 {MAX_IMAGES} 张图片。")
+        store = ImageStore(self.settings.artifact_dir)
+        attached = [store.lookup(item['id']) for item in attachments or []]
         with self.database.session() as session:
             repo = AgentRepository(session)
             user_seq = repo.reserve_user_seq(thread_id)
-            human = HumanMessage(id=str(uuid.uuid4()), content=text)
+            human = HumanMessage(
+                id=str(uuid.uuid4()), content=text,
+                additional_kwargs={"attachments": attached} if attached else {},
+            )
             row = repo.add_message(
                 thread_id=thread_id,
                 user_seq=user_seq,
@@ -331,9 +341,13 @@ class AgentApplication:
     def active_history(self, thread_id: str, *, limit: int | None = 20) -> list[HistoryEntry]:
         with self.database.session() as session:
             rows = AgentRepository(session).active_messages(thread_id, limit=limit)
-            return [
-                HistoryEntry(row.user_seq, row.type, decode_message(row).content) for row in rows
-            ]
+            entries = []
+            for row in rows:
+                message = decode_message(row)
+                references = image_references(message.additional_kwargs.get("attachments", []))
+                content = [message.content, references] if references else message.content
+                entries.append(HistoryEntry(row.user_seq, row.type, content))
+            return entries
 
     def list_threads(self, *, limit: int = 50) -> list[ThreadSummary]:
         with self.database.session() as session:

@@ -4,14 +4,15 @@ import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from deepagents import FilesystemMiddleware
 from deepagents.backends import FilesystemBackend
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic import ChatAnthropic
-from langchain_core.tools import tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.config import get_config
 
 from ..config import Settings
@@ -26,6 +27,7 @@ from ..services.message_persistence import MessagePersistenceService
 from ..services.tool_execution import ToolExecutionService
 from ..workspace.artifacts import ArtifactStore
 from ..workspace.file_undo import FileMutationRecorder
+from ..workspace.images import ImageStore, image_references
 from .agents_md import AgentsMd, load_agents_md
 from .bash_tool import make_bash_tool
 from .middleware import AgentRuntimeMiddleware, RunContext
@@ -153,6 +155,23 @@ def make_search_tool(client: SearchClient):
     return search_tool
 
 
+def make_read_image_tool(store: ImageStore):
+    @tool("read_image", parse_docstring=True)
+    def read_image(image_id: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> ToolMessage:
+        """重新查看消息或压缩历史中引用的图片。返回实际图片供视觉分析。
+
+        Args:
+            image_id: 图片引用中的完整 img_ 标识。
+        """
+        try:
+            attachment = store.lookup(image_id)
+        except ValueError as error:
+            return ToolMessage(content=str(error), tool_call_id=tool_call_id, status="error")
+        return ToolMessage(content=image_references([attachment]), tool_call_id=tool_call_id,
+                           additional_kwargs={"attachments": [attachment]})
+    return read_image
+
+
 def shared_filesystem_middleware(settings: Settings) -> FilesystemMiddleware:
     return FilesystemMiddleware(
         backend=FilesystemBackend(
@@ -187,7 +206,8 @@ def shared_agent_tools(
     和面板各说各话）；不传就自己读——子代理是另一个进程，读自己那份。
     """
 
-    tools: list[Any] = [make_work_state_tool(context_engine), make_todo_tool(context_engine)]
+    tools: list[Any] = [make_work_state_tool(context_engine), make_todo_tool(context_engine),
+                        make_read_image_tool(ImageStore(settings.artifact_dir))]
     if extra_tools:
         tools.extend(extra_tools)
     bash_prompt = ""
@@ -205,7 +225,9 @@ def shared_agent_tools(
             raise RuntimeError("search is enabled but no SearchClient was provided")
         tools.append(make_search_tool(search_client))
     rules = agents_md if agents_md is not None else load_agents_md(settings)
-    return tools, rules.text + bash_prompt
+    return tools, rules.text + bash_prompt + (
+        "\n图片引用形如 [图片附件：img_...]；引用不等于看过图片。需要原图时调用 read_image。"
+    )
 
 
 def _make_run_subagent_tool(settings: Settings, jobs: SubAgentJobs) -> Any:

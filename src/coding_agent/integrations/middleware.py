@@ -17,6 +17,7 @@ from ..services.message_persistence import MessagePersistenceService
 from ..services.tool_execution import ToolExecutionService
 from ..workspace.artifacts import ArtifactStore
 from ..workspace.file_undo import FileMutationRecorder
+from ..workspace.images import ImageStore
 
 
 @dataclass
@@ -45,6 +46,7 @@ class AgentRuntimeMiddleware(AgentMiddleware[Any, RunContext, Any]):
         self.call_limits = call_limits
         self.tool_execution = tool_execution
         self.artifacts = artifacts
+        self.images = ImageStore(artifacts.root)
         self.file_mutations = file_mutations
         self.tool_result_inline_tokens = tool_result_inline_tokens
 
@@ -62,7 +64,9 @@ class AgentRuntimeMiddleware(AgentMiddleware[Any, RunContext, Any]):
 
         response = self.call_limits.before_model(context.budget)
         if response is None:
-            response = handler(request)
+            response = handler(request.override(
+                messages=self.images.materialize_messages(request.messages)
+            ))
         if not isinstance(response, ModelResponse):
             return response
 

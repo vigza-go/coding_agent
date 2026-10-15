@@ -12,6 +12,7 @@ from time import monotonic, sleep
 from typing import Any
 
 from prompt_toolkit import HTML, PromptSession
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
@@ -28,12 +29,16 @@ from ..config import load_settings
 from ..context.todo import render as todo_render
 from ..integrations.agents_md import LoadedRuleFile
 from ..integrations.desktop import DesktopService
+from ..integrations.image_clipboard import read_clipboard_image
 from ..persistence.thread_lock import ThreadBusyError
 from ..services.progress import TurnEvent, TurnEventGate, TurnEventKind
+from ..workspace.images import MAX_IMAGES, ImageStore
 from .commands import CommandParseError, ParsedCommand, parse_command, positive_int
 from .rendering import TUI_THEME, ContentRenderer
 
 HELP = """可用命令：
+  /attachments   查看待发送图片
+  /detach [N]    移除第 N 张图片；无参数移除全部
   /history [N]   查看最近 N 条有效消息（默认 20）
   /threads       查看最近会话
   /thread ID     切换会话（别人正占着则拒绝）
@@ -44,7 +49,7 @@ HELP = """可用命令：
   /help          显示帮助
   /exit          退出
 
-输入：Enter 发送，Alt+Enter 插入换行，方向键浏览本次启动中的输入历史。"""
+输入：Enter 发送，Alt+Enter 插入换行，Ctrl+V 粘贴图片，方向键浏览本次启动中的输入历史。"""
 
 
 def _hud_plan(todos: list[dict[str, Any]] | None) -> str:
@@ -73,7 +78,7 @@ def _hud_plan(todos: list[dict[str, Any]] | None) -> str:
     return f"计划 {settled}/{len(items)} · {tail}"
 
 
-def _input_bindings() -> KeyBindings:
+def _input_bindings(on_paste=None) -> KeyBindings:
     bindings = KeyBindings()
 
     @bindings.add("enter")
@@ -83,6 +88,12 @@ def _input_bindings() -> KeyBindings:
     @bindings.add("escape", "enter")
     def newline(event) -> None:
         event.current_buffer.insert_text("\n")
+
+    if on_paste is not None:
+        @bindings.add("c-v")
+        async def paste_image(event) -> None:
+            await run_in_terminal(on_paste)
+            event.app.invalidate()
 
     return bindings
 
@@ -119,6 +130,8 @@ class TerminalUI:
         self.thread_id = thread_id
         self.debug = debug
         self.renderer = ContentRenderer()
+        self.images = ImageStore(app.settings.artifact_dir)
+        self.attachments: list[dict] = []
         self.desktop = DesktopService(
             app.settings.tui,
             lambda message: self.console.print(Text(message, style="yellow")),
@@ -126,7 +139,7 @@ class TerminalUI:
         self.session: PromptSession[str] = PromptSession(
             history=InMemoryHistory(),
             multiline=True,
-            key_bindings=_input_bindings(),
+            key_bindings=_input_bindings(self._paste_image),
         )
         # 底栏显示的内容（formatted text）：在回合边界算一次，回调只负责交出去。
         self._hud: StyleAndTextTuples = []
@@ -172,7 +185,8 @@ class TerminalUI:
     def _toolbar(self) -> StyleAndTextTuples:
         # 注解必须用 prompt_toolkit 的别名：`list[tuple[str, str]]` 看着一样，但 list 是不变的，
         # 它接不到 `list[OneStyleAndTextTuple]`（= list[str | tuple[str, str]]）上去，Pylance 会红。
-        return self._hud
+        return self._hud + ([("ansicyan", f" · 待发送图片 {len(self.attachments)} 张")]
+                            if self.attachments else [])
 
     def run(self) -> None:
         self.console.print(
@@ -199,12 +213,13 @@ class TerminalUI:
                     bottom_toolbar=self._toolbar,
                 ).strip()
             except KeyboardInterrupt:
-                self.console.print("[dim]已清空当前输入。[/dim]")
+                self.attachments.clear()
+                self.console.print("[dim]已清空当前输入和待发送图片。[/dim]")
                 continue
             except EOFError:
                 self.console.print("\n已退出。")
                 return
-            if not text:
+            if not text and not self.attachments:
                 continue
 
             try:
@@ -257,7 +272,40 @@ class TerminalUI:
             sleep(_TTY_EXIT_GRACE_SECONDS)
             os._exit(0)
 
+    def _add_image(self, attachment: dict) -> None:
+        if len(self.attachments) >= MAX_IMAGES:
+            raise ValueError(f"每条消息最多附加 {MAX_IMAGES} 张图片。")
+        self.attachments.append(attachment)
+        self.console.print(Text(
+            f"已添加图片 #{len(self.attachments)} · {attachment['width']}×{attachment['height']}"
+            "；输入问题后发送，或直接回车发送图片。"
+        ))
+
+    def _paste_image(self) -> None:
+        try:
+            if len(self.attachments) >= MAX_IMAGES:
+                raise ValueError(f"每条消息最多附加 {MAX_IMAGES} 张图片。")
+            self._add_image(self.images.import_bytes(read_clipboard_image()))
+        except (ValueError, OSError) as error:
+            self._error(str(error))
+
     def _handle_command(self, command: ParsedCommand) -> bool:
+        if command.name == "attachments":
+            if not self.attachments:
+                self.console.print("没有待发送图片。")
+            for index, item in enumerate(self.attachments, 1):
+                self.console.print(Text(f"{index}. {item['id']} · {item['width']}×{item['height']}"))
+            return True
+        if command.name == "detach":
+            if command.argument is None:
+                self.attachments.clear()
+            else:
+                index = positive_int(command.argument, label="图片序号") - 1
+                if index >= len(self.attachments):
+                    raise CommandParseError("图片序号不存在。")
+                self.attachments.pop(index)
+            self.console.print("已移除待发送图片。")
+            return True
         if command.name == "exit":
             return False
         if command.name == "help":
@@ -271,6 +319,7 @@ class TerminalUI:
             except ThreadBusyError as error:
                 self._error(f"不切换。{error}")
                 return True
+            self.attachments.clear()
             self.thread_id = target
             self.console.print(f"已切换到 thread=[cyan]{markup_escape(self.thread_id)}[/cyan]")
             return True
@@ -325,10 +374,14 @@ class TerminalUI:
                         self.thread_id,
                         text,
                         on_event=event_gate.emit,
+                        **({"attachments": list(self.attachments)} if self.attachments else {}),
                     )
             except TurnExecutionError as error:
+                self.attachments.clear()
                 failure = error
                 answer = None
+            else:
+                self.attachments.clear()
             finally:
                 event_gate.close()
 
@@ -631,6 +684,7 @@ class TerminalUI:
         if Confirm.ask(f"确认清空 thread={self.thread_id} 的上下文吗？", default=False):
             with self.console.status("[yellow]正在清空…[/yellow]", spinner="dots"):
                 result = self.app.clear_context(self.thread_id)
+                self.attachments.clear()
             self.console.print(
                 f"已停用 {result.deactivated_messages} 条消息，工作状态一并清空；"
                 "工作树未做任何改动。下一轮从零开始。"

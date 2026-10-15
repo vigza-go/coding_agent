@@ -86,6 +86,8 @@ class ContentRenderer:
             return "\n".join(part for part in parts if part)
         if isinstance(content, dict):
             block_type = content.get("type")
+            if block_type in {"image", "image_url"}:
+                return "[图片内容]"
             if block_type in self.HIDDEN_BLOCK_TYPES:
                 return ""
             if "text" in content:

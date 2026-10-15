@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
+from ..workspace.images import estimated_image_tokens, image_references
 from .records import MessageSnapshot
 from .tokens import estimate_tokens
 
@@ -42,6 +43,9 @@ def sanitize_transcript(messages: Sequence[MessageSnapshot]) -> str:
         role = {"user": "用户", "assistant": "助手", "tool": "工具", "system": "系统"}.get(
             message.type, message.type
         )
+        references = image_references(data.get("additional_kwargs", {}).get("attachments", []))
+        if references:
+            lines.append(references)
         content = data.get("content")
         if isinstance(content, str):
             if content.strip():
@@ -130,7 +134,9 @@ def visible_text(message: MessageSnapshot) -> str:
 def message_tokens(message: MessageSnapshot) -> int:
     """一条消息占多少 token —— 全局只有这一把尺子（触发线、尾留、切块、摘要配额共用）。"""
 
-    return estimate_tokens(visible_text(message))
+    data = message.content_json.get("data") or message.content_json
+    attachments = data.get("additional_kwargs", {}).get("attachments", [])
+    return estimate_tokens(visible_text(message)) + estimated_image_tokens(attachments)
 
 
 def split_token_balanced(
